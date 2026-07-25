@@ -46,6 +46,21 @@ const SKILL_METADATA: Record<string, { description: string; params: Record<strin
         },
         required: ["targetType"]
     },
+    buildRedstoneCircuit: {
+        description: "Build a standard redstone circuit in Minecraft at the specified position. Supports logic gates (NOT, OR, AND, XOR, NAND, NOR, XNOR), sequential circuits (RS_NOR_LATCH, T_FLIPFLOP, EDGE_DETECTOR), arithmetic (HALF_ADDER), clocks (REPEATER_CLOCK, HOPPER_CLOCK), and contraptions (PISTON_DOOR_2X2, ITEM_SORTER). IMPORTANT: Use simulateRedstoneCircuit first to verify the circuit before building.",
+        params: {
+            circuit: {
+                type: "string",
+                description: "Circuit name. One of: NOT, OR, AND, XOR, NAND, NOR, XNOR, RS_NOR_LATCH, T_FLIPFLOP, HALF_ADDER, REPEATER_CLOCK, HOPPER_CLOCK, PISTON_DOOR_2X2, ITEM_SORTER, EDGE_DETECTOR, RIPPLE_CARRY_ADDER"
+            },
+            x: { type: "number", description: "Base X coordinate (circuit origin, input side)" },
+            y: { type: "number", description: "Base Y coordinate" },
+            z: { type: "number", description: "Base Z coordinate (circuit origin, input side)" },
+            facing: { type: "string", description: "Circuit orientation: east (default, output faces east), north, south, or west" },
+            bits: { type: "number", description: "Bit width for parameterized circuits (default: 4)" }
+        },
+        required: ["circuit", "x", "y", "z"]
+    },
     cookItem: {
         description: "Cook an item in a furnace",
         params: {
@@ -70,6 +85,20 @@ const SKILL_METADATA: Record<string, { description: string; params: Record<strin
             name: { type: "string", description: "Optional: Name of the dance move" }
         },
         required: []
+    },
+    diffRedstoneCircuit: {
+        description: "Compare two redstone circuit templates and compute the minimal block differences for incremental rebuild. Returns lists of blocks to add, remove, and modify — avoiding full circuit rebuild.",
+        params: {
+            circuitA: {
+                type: "string",
+                description: "Original circuit template JSON (inline string or object with 'blocks' array)"
+            },
+            circuitB: {
+                type: "string",
+                description: "Modified circuit template JSON (inline string or object with 'blocks' array)"
+            }
+        },
+        required: ["circuitA", "circuitB"]
     },
     dropItem: {
         description: "Drop items from inventory",
@@ -344,6 +373,41 @@ const SKILL_METADATA: Record<string, { description: string; params: Record<strin
             }
         },
         required: ["message"]
+    },
+    scanRedstoneCircuit: {
+        description: "Scan a rectangular region in Minecraft and detect redstone circuits. Identifies components, builds a signal graph, and recognizes known circuit patterns (NOT, AND, RS NOR Latch). Outputs structured JSON for use with buildRedstoneCircuit or diffRedstoneCircuit.",
+        params: {
+            x1: { type: "number", description: "First corner X coordinate" },
+            y1: { type: "number", description: "First corner Y coordinate" },
+            z1: { type: "number", description: "First corner Z coordinate" },
+            x2: { type: "number", description: "Second corner X coordinate" },
+            y2: { type: "number", description: "Second corner Y coordinate" },
+            z2: { type: "number", description: "Second corner Z coordinate" },
+            autoAnalyze: { type: "boolean", description: "Auto-recognize circuit patterns (default: true)" }
+        },
+        required: ["x1", "y1", "z1", "x2", "y2", "z2"]
+    },
+    simulateRedstoneCircuit: {
+        description: "Simulate a redstone circuit using the Nucleation engine to verify correctness BEFORE building. Runs all truth table test vectors automatically and returns PASS/FAIL with detailed timing analysis. ALWAYS simulate before calling buildRedstoneCircuit.",
+        params: {
+            circuit: {
+                type: "string",
+                description: "Circuit JSON template (inline JSON string) or circuit name matching buildRedstoneCircuit"
+            },
+            testInputs: {
+                type: "array",
+                description: "Optional custom test vectors as [{inputs: {A:1,B:0}, expected: {Q:0}}]. If omitted, auto-generates from truth table."
+            },
+            autoTest: {
+                type: "boolean",
+                description: "Auto-test all truth table combinations (default: true)"
+            },
+            ticks: {
+                type: "number",
+                description: "Simulation ticks to run per test vector (default: 40)"
+            }
+        },
+        required: ["circuit"]
     }
 };
 

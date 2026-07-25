@@ -1,312 +1,143 @@
-# Fundamental Labs/Minecraft Client
+# Minecraft Redstone MCP — AI 驱动的红石电路设计、仿真与建造系统
 
-This library is the Client library for a Minecraft Game Skills and MCP Integration.
+基于 [FundamentalLabs/minecraft-mcp](https://github.com/FundamentalLabs/minecraft-mcp) 的扩展，为 AI Agent 添加红石电路的结构化设计、仿真验证和游戏内自动建造能力。
 
-Fairies MCP Client (<https://fairies.ai/>) also supports direct connection with a single click.
+## 架构
 
-## Features
-
-- **Full Minecraft Control**: Connect AI agents to Minecraft servers and control bots
-- **30 Verified Skills**: Pre-built, tested skills for common Minecraft tasks
-- **Flexible Connection**: Connect to any Minecraft server with optional per-bot configuration
-- **Multi-Bot Support**: Manage multiple bots simultaneously
-- **MCP Standard**: Compatible with any MCP client (Claude Desktop, etc.)
-
-## Installation
-
-### Direct call via npx (Recommended)
-
-```bash
-npx --y -- @fundamentallabs/minecraft-mcp
+```
+用户自然语言 → Agent (Claude) → MCP Server → Mineflayer Bot → Minecraft
+                   ↑                              ↑
+              SKILL.md (知识)            Nucleation (仿真引擎)
 ```
 
-### Via npm (Recommended)
+**三层协作**：
+1. **知识层**（SKILL.md）：Agent 读取电路分类、编码格式、建造约束
+2. **仿真层**（nucleation_bridge.py）：建造前逻辑验证，9/9 电路通过
+3. **执行层**（buildRedstoneCircuit.ts）：游戏内自动放置 `/setblock` 命令
+
+## 游戏内验证结果（2026-07-25）
+
+| 电路 | 测试结果 |
+|------|---------|
+| NOT Gate | 2/2 ✅ |
+| AND Gate | 4/4 ✅ |
+| NAND Gate (AND→NOT chain) | 4/4 ✅ |
+| 3-bit 进位计算器 | 4/4 ✅ |
+
+## 快速开始
+
+### 1. 安装依赖
 
 ```bash
-npm install -g @fundamentallabs/minecraft-mcp
-```
-
-### From Source
-
-```bash
-git clone https://github.com/FundamentalLabs/minecraft-mcp.git
-cd minecraft-mcp/minecraft-client/mcp-server
+cd mcp-server
 npm install
 npm run build
+pip install nucleation
 ```
 
-## Usage
+### 2. 配置 Claude Desktop
 
-### Starting the Server
-
-You can start the MCP server with optional default connection settings:
-
-```bash
-# Start with no defaults (connection specified per bot)
-minecraft-mcp
-
-# Start with default connection settings
-minecraft-mcp -h play.example.com -p 25565
-```
-
-### Command Line Options
-
-```bash
-Options:
-  -p, --port <port>  Minecraft server port (default: 25565)
-  -h, --host <host>  Minecraft server host (default: localhost)
-  --help            Display help
-```
-
-### Integration with Claude Desktop or JSON configurations Locally
-
-Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
-
-For remote installation (recommended)
-
-```json
-{
-  "mcpServers": {
-    "minecraft": {
-      "command": "npx",
-      "args": ["-y", "-- @fundamentallabs/minecraft-mcp"]
-    }
-  }
-}
-```
-
-If running locally from source:
+`~/Library/Application Support/Claude/claude_desktop_config.json`：
 
 ```json
 {
   "mcpServers": {
     "minecraft": {
       "command": "node",
-      "args": ["/path/to/minecraft-mcp/minecraft-client/mcp-server/dist/mcp-server.js"]
+      "args": ["/path/to/mcp-server/dist/mcp-server.js"]
     }
   }
 }
 ```
 
-Replace `/path/to/minecraft-mcp` with the actual path where you cloned the repository.
+### 3. 使用
 
-### Integration with Other MCP Clients
+1. 打开 Minecraft Java 1.20.1+，进入世界，对局域网开放
+2. 重启 Claude Desktop
+3. 对话示例：
+   - "加入游戏，端口 25565"
+   - "在脚下建一个 AND 门"
+   - "仿真验证 XOR 门"
 
-The server uses stdio transport and can be integrated with any MCP client:
+## MCP 工具
 
-```bash
-# Using the MCP inspector for testing
-cd minecraft-client/mcp-server
-npx @modelcontextprotocol/inspector node dist/mcp-server.js -- -p 25565
+| 工具 | 功能 |
+|------|------|
+| `joinGame` | Bot 加入游戏 |
+| `leaveGame` | Bot 退出 |
+| `buildRedstoneCircuit` | 建造标准红石电路（16 个模板） |
+| `simulateRedstoneCircuit` | 仿真验证电路正确性 |
+| `scanRedstoneCircuit` | 扫描已有电路，识别元件和模式 |
+| `diffRedstoneCircuit` | 计算两个电路模板的差异 |
+
+## 文件结构
+
+```
+mcp-server/
+├── src/
+│   ├── skills/verified/
+│   │   ├── buildRedstoneCircuit.ts    # 建造工具
+│   │   ├── simulateRedstoneCircuit.ts # 仿真工具
+│   │   ├── scanRedstoneCircuit.ts     # 扫描工具
+│   │   └── diffRedstoneCircuit.ts     # 差异工具
+│   ├── lib/
+│   │   ├── terrainDetector.ts         # 地形检测
+│   │   ├── redstonePowerRules.ts      # 红石充能规则
+│   │   └── redstoneGraph.ts           # 信号图引擎
+│   └── skillRegistry.ts              # 工具注册
+├── scripts/
+│   ├── nucleation_bridge.py           # Nucleation 仿真桥接
+│   ├── build-2bit-adder.cjs          # 2-bit 加法器建造脚本
+│   └── test-2bit-adder.cjs           # 2-bit 加法器测试脚本
+├── dist/                              # 编译输出
+└── package.json
 ```
 
-## Available Skills
+Agent Skill 文件位于 `~/.claude/skills/minecraft-redstone-coding/SKILL.md`（~1050 行）。
 
-### Bot Management
+## 建造约束（游戏中验证发现）
 
-- **joinGame** - Spawn a new bot into the Minecraft game
-  - `username` (required): Bot's username
-  - `host` (optional): Server host (defaults to 'localhost' or command line option)
-  - `port` (optional): Server port (defaults to 25565 or command line option)
+| 规则 | 说明 |
+|------|------|
+| 玻璃基底 | 超平坦世界草地全局导电，必须用玻璃隔离 |
+| 线不覆盖安装石 | 门间连线 `< mountPos`，否则墙上火把掉落 |
+| 命令延迟 ≥200ms | 更快会导致服务器丢弃命令 |
+| 红石块必须同Y层 | 红石块只能充能同 Y 层紧邻灰线 |
+| 电路距 Bot ≤50 格 | `blockAt()` 在未加载区块返回 null |
 
-- **leaveGame** - Disconnect bot(s) from the game
-  - `username` (optional): Specific bot to disconnect
-  - `disconnectAll` (optional): Disconnect all bots if true
+## 依赖与致谢
 
-### Movement & Navigation
+本项目基于以下开源项目构建：
 
-- **goToSomeone** - Navigate to another player
-- **goToKnownLocation** - Navigate to specific coordinates
-- **runAway** - Run away from threats
-- **swimToLand** - Swim to nearest land when in water
+| 项目 | 协议 | 用途 |
+|------|------|------|
+| [FundamentalLabs/minecraft-mcp](https://github.com/FundamentalLabs/minecraft-mcp) | MIT | MCP Server 基础框架，30 个已验证技能 |
+| [Mineflayer](https://github.com/PrismarineJS/mineflayer) | MIT | Minecraft Bot API（Java 版） |
+| [mineflayer-pathfinder](https://github.com/PrismarineJS/mineflayer-pathfinder) | MIT | A* 寻路 |
+| [mineflayer-pvp](https://github.com/PrismarineJS/mineflayer-pvp) | MIT | PVP 战斗 |
+| [mineflayer-tool](https://github.com/PrismarineJS/mineflayer-tool) | MIT | 自动工具选择 |
+| [mineflayer-collectblock](https://github.com/PrismarineJS/mineflayer-collectblock) | MIT | 方块采集 |
+| [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/sdk) | MIT | MCP 协议实现 |
+| [Nucleation](https://github.com/Schem-at/Nucleation) | AGPL-3.0 | 红石仿真引擎（Schematic + CircuitBuilder + MCHPRS） |
+| [Vec3](https://github.com/PrismarineJS/node-vec3) | MIT | 3D 向量运算 |
 
-### Combat & Hunting
+## 协议
 
-- **attackSomeone** - Attack players, mobs, or animals
-- **hunt** - Hunt animals or mobs
+本项目基于 FundamentalLabs/minecraft-mcp（MIT）进行扩展。
 
-### Resource Gathering
+- 源代码部分：MIT License
+- Nucleation 桥接组件：AGPL-3.0（继承自 Nucleation）
+- SKILL.md 知识文档：CC-BY-4.0
 
-- **mineResource** - Mine specific blocks or resources
-- **harvestMatureCrops** - Harvest mature crops from farmland
-- **pickupItem** - Pick up items from the ground
+详见各子目录的 LICENSE 文件。
 
-### Crafting & Smelting
+## 已知限制
 
-- **craftItems** - Craft items using a crafting table
-- **cookItem** - Cook items in a furnace
-- **smeltItem** - Smelt items in a furnace
-- **retrieveItemsFromNearbyFurnace** - Get smelted items from furnace
+- 多火把组合电路（XOR/HalfAdder/FullAdder）的手工块级布局未完全验证——需 Nucleation MCHPRS 块级仿真支持（Phase 3）
+- 建造需 Minecraft 开启作弊（`/setblock` 需要 OP 权限）
+- Bot 通过 LAN 加入，需同一网络
+- 仅支持 Minecraft Java 版 1.20.1+
 
-### Inventory Management
+---
 
-- **openInventory** - Open the bot's inventory
-- **equipItem** - Equip armor, tools, or weapons
-- **dropItem** - Drop items from inventory
-- **giveItemToSomeone** - Give items to another player
-
-### Building & Farming
-
-- **placeItemNearYou** - Place blocks near the bot
-- **prepareLandForFarming** - Prepare land for farming
-- **useItemOnBlockOrEntity** - Use items on blocks or entities
-
-### Survival
-
-- **eatFood** - Eat food to restore hunger
-- **rest** - Rest to regain health
-- **sleepInNearbyBed** - Find and sleep in a bed
-
-### Storage
-
-- **openNearbyChest** - Open a nearby chest
-
-### Fun
-
-- **dance** - Make the bot dance
-
-### Vision
-
-- **lookAround** - Look around and observe the environment
-
-### Communication
-
-- **readChat** - Read recent chat messages from the server
-- **sendChat** - Send chat messages or commands to the server
-
-### Building
-
-- **buildSomething** - Build structures using Minecraft commands (requires cheats/operator permissions). Supports both static command arrays and dynamic JavaScript code.
-- **buildPixelArt** - Build pixel art from an image in Minecraft (requires cheats/operator permissions). Converts an image to pixel art using colored blocks. Maximum size is 256x256 blocks.
-
-## API Example
-
-When integrated with an MCP client, you can control the bot like this:
-
-```javascript
-// First, spawn a bot
-await client.callTool('joinGame', { username: 'MyBot' });
-
-// Make the bot mine some wood
-await client.callTool('mineResource', { name: 'oak_log', count: 10 });
-
-// Craft wooden planks
-await client.callTool('craftItems', { item: 'oak_planks', count: 40 });
-
-// Navigate to coordinates
-await client.callTool('goToKnownLocation', { x: 100, y: 64, z: 200 });
-
-// Build a structure using commands (requires cheats) - Script mode
-await client.callTool('buildSomething', {
-  buildScript: [
-    { command: "fill", x1: 0, y1: 64, z1: 0, x2: 10, y2: 64, z2: 10, block: "stone" },
-    { command: "fill", x1: 1, y1: 65, z1: 1, x2: 9, y2: 68, z2: 9, block: "oak_planks" },
-    { command: "setblock", x: 5, y: 65, z: 1, block: "oak_door" }
-  ]
-});
-
-// Build dynamically with JavaScript (requires cheats) - Code mode
-await client.callTool('buildSomething', {
-  code: `
-    // Build a pyramid centered on the bot
-    const size = 10;
-    for (let y = 0; y < size; y++) {
-      const level = size - y;
-      fill(pos.x - level, pos.y + y, pos.z - level,
-           pos.x + level, pos.y + y, pos.z + level, 'sandstone');
-      await wait(5); // Small delay between levels
-    }
-    log('Pyramid complete!');
-  `
-});
-
-// Build pixel art from an image (requires cheats)
-await client.callTool('buildPixelArt', {
-  imagePath: 'https://example.com/logo.png',
-  width: 64,
-  height: 64,
-  x: 0,
-  y: 80,
-  z: 100,
-  facing: 'north'
-});
-
-// Read recent chat messages
-await client.callTool('readChat', {
-  count: 30,
-  timeLimit: 300,  // Last 5 minutes
-  filterType: 'chat'  // Only player messages
-});
-
-// Send a chat message
-await client.callTool('sendChat', {
-  message: 'Hello everyone! I am a bot.'
-});
-
-// Send a command
-await client.callTool('sendChat', {
-  message: '/time set day'
-});
-
-// Send a whisper
-await client.callTool('sendChat', {
-  message: '/msg Steve I can help you build!',
-  delay: 1000  // Wait 1 second before sending
-});
-```
-
-## Architecture
-
-The MCP server:
-
-- Uses stdio transport for communication with AI clients
-- Dynamically loads skills from the verified skills directory
-- Manages multiple bot instances (currently uses the first bot for all operations)
-- Provides a unified interface for all bot actions
-
-## Requirements
-
-- Node.js >= 18.0.0
-- A Minecraft server (Java Edition) to connect to
-- An MCP-compatible client (like Claude Desktop)
-
-## Troubleshooting
-
-### "Skill implementation not found" Error
-
-The MCP server needs to be run from the cloned repository with built skills. Make sure you:
-
-1. Cloned the full repository
-2. Ran `npm install` in the minecraft-client directory
-3. Ran `npm run build` in the minecraft-client directory
-4. Are running the MCP server from the correct directory
-
-### Bot won't connect
-
-- Ensure your Minecraft server is running and accessible
-- Check that the port and host are correct
-- Verify the server allows the Minecraft version the bot uses
-
-### Skills not working
-
-- Make sure the bot has spawned successfully before using skills
-- Some skills require specific items or conditions
-- Check the bot's console output for error messages
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-MIT - see LICENSE file for details
-
-## Support
-
-For issues and feature requests, please use the [GitHub issue tracker](https://github.com/FundamentalLabs/minecraft-mcp/issues).
-
-### Testing
-
-To test with the Anthropic MPC inspector
-
-'npx @modelcontextprotocol/inspector node ./dist/mcp-server.js'
+🤖 Generated with [Claude Code](https://claude.com/claude-code)

@@ -41,3 +41,4 @@ yarn.lock
 *.tmp
 *.temp
 .cache/
+__pycache__/
