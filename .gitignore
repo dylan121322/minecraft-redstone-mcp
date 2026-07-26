@@ -43,3 +43,10 @@ yarn.lock
 .cache/
 __pycache__/
 
+# Redstone build artifacts (litematics, routing results)
+*.litematic
+*_route.json
+*_wiring.json
+# Windows compute job logs
+*_batch.log
+*_log.txt
