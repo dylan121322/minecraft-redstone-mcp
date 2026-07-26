@@ -155,19 +155,56 @@ description: Use when the agent needs to design, describe, simulate, or generate
 | **客户端缓存滞后** | 用 `bot.blockAt(pos)._properties` 读状态——这是 **Mineflayer 客户端缓存**,服务端方块已更新但客户端包未到,读出的是旧值 | 用**服务端查询** `/execute if block <pos> <block>[state=val] run say MARKER`,监听 `MARKER` 消息 |
 | **中继器朝向反了** | 以为 `facing` 是输出方向 | `facing` 是**输入方向**：`getInputSignal` 读 `pos.relative(facing)`。红石块在西 → 中继器要 `facing=west`(输入朝西对准电源),输出在东 |
 
+### MCHPRS 仿真规则（nucleation 引擎，2026-07-25 实测）
+
+**建造前用 `nucleation.Schematic` + `nucleation.MchprsWorld` 仿真验证逻辑，再导出 litematic 一次性粘贴（绕过 /setblock 速率与区块加载问题）。** MCHPRS 是精确红石仿真，其规则与游戏基本一致但有几处必须遵守：
+
+```python
+import nucleation as n
+schem = n.Schematic.create("gate")
+schem.set_block_from_string(x, y, z, "minecraft:redstone_wire")
+# 每个测试向量重建 schematic，用 redstone_block 注入输入
+world = n.MchprsWorld.create_with_options(schem, False, False)  # optimize=False
+world.tick(8)                          # 稳定
+lit = world.is_lit(x, y, z)            # 读灯
+pwr = world.get_redstone_power(x,y,z)  # 读灰电平 0-15
+schem.save_to_file("gate.litematic")   # 导出
+```
+
+| 规则 | 约束 | 违反后果 |
+|------|------|---------|
+| `INPUT_SOURCE` | 输入用 `redstone_block`（放置=1/air=0），**每向量重建 schematic** | `set_lever_power`/`on_use_block` 对 lever 不驱动红石 |
+| `STANDING_TORCH_SAME_Y` | 站立火把（`redstone_torch` 在方块顶）只给**同层 Y+1 水平相邻**灰供电，**不给下层 Y=0** | torch 在 Y+1、后续灰在 Y=0 的立体布局断路 |
+| `WALL_TORCH_PLANAR` | 墙上火把（`redstone_wall_torch[facing=east]` 附着西侧块）全平面工作，是可靠反相器 | 立体火把布局在 MCHPRS 难复现 |
+| `STRONG_POWER_STRAIGHT` | 灰强充能实体块的前提：该灰是**直线段末端指向该块**；T 形/汇合分支**不**触发强充能 | NOR 汇合后 torch 常亮——必须再加一段单独直线灰指向下级 mount |
+| `OPTIMIZE_FALSE` | 用 `create_with_options(schem, False, False)` | `optimize=True` 可能优化掉无源测试电路 |
+
+**MCHPRS 验证过的平面 AND（4/4，全 Y=0）**：
+```
+A → stone → wall_torch[east]  (NOT A) ┐
+                                       ├→ merge灰(3格) → 直线灰(1格) → stone → wall_torch[east] → 输出灰 → lamp
+B → stone → wall_torch[east]  (NOT B) ┘
+```
+关键：merge 灰汇合两路后，**必须再接一段单独直线灰**指向 final mount，否则强充能不生效（`STRONG_POWER_STRAIGHT`）。
+
+> **游戏布局 vs MCHPRS 布局**：SKILL.md §1.3 的立体 AND（火把 Y+1）在**游戏内** 4/4，但在 **MCHPRS** 断路（`STANDING_TORCH_SAME_Y`）。编译器的 GATE_LAYOUTS 面向 MCHPRS 时必须用**全平面墙上火把布局**。
+
 ### 区块加载约束（强制）
 
-**Bot 只能读取已加载区块内的方块状态。**
+**Bot 只能读取已加载区块内的方块状态；且 `/setblock` 目标超出加载半径会静默失败。**
 
 ```
-❌ 在 X=200 处放置方块，Bot 在 X=0 处读取 → 返回 null
-✅ 电路建造在 Bot 50 格范围内
+❌ 在 X=200 处放置方块，Bot 在 X=0 处读取 → 返回 null；/setblock 也静默失败
+✅ 电路建造在 Bot 50 格范围内；或 Bot 边建边 /tp 跟随
 ```
 
 | 规则 | 约束 | 违反后果 |
 |------|------|---------|
 | `CHUNK_RADIUS` | 电路必须建造在 Bot 当前位置 50 格范围内 | `bot.blockAt()` 返回 `null` |
 | `BUILD_NEAR_BOT` | 建造脚本使用 `Math.floor(bot.entity.position.x) + offset` 定位 | 块在未加载区块中不可读 |
+| `SETBLOCK_LOAD_RADIUS` | `/setblock` 目标超出 Bot ~13 区块（~210格）静默失败（实测：240格=0/10，200格=100%） | 远端方块未放置，构建残缺 |
+| `CMD_RATE_LIMIT` | `bot.chat` 发命令 > ~150ms/条会被服务端丢弃（实测 200ms=100%，80ms=14%）；`cmd()` 若 async 需真正 `await` 串行 | 突发命令批量丢失，构建 ~50% 残缺 |
+| `NO_COORD_OVERLAP` | 多门布局坐标不可重叠（全加器 5 门挤在 10×6 有 10 处碰撞） | 后写覆盖先写，每单元丢 ~6 块 |
 
 ### 已验证门模板
 
@@ -179,18 +216,25 @@ description: Use when the agent needs to design, describe, simulate, or generate
 | **AND** | 4/4 ✅ | 3 地面火把 + 1 墙上火把输出，灰在安装块顶上 |
 | **NAND** | 4/4 ✅ | AND + 墙上火把 NOT（门链验证通过） |
 
+### MCHPRS 平面门模板（块级仿真验证）
+
+以下为**全平面墙上火把布局**，经 MCHPRS 块级仿真验证真值表（非游戏立体布局）：
+
+| 门 | MCHPRS | 布局要点 |
+|----|--------|---------|
+| **AND** | 4/4 ✅ | NOT A / NOT B（墙上火把）→ merge灰 → 直线灰 → final NOT → 输出（见上方图） |
+
 ### 未验证门模板
 
-以下模板的逻辑正确性已由仿真引擎验证，但块级布局未经游戏内测试：
+以下逻辑已由行为仿真验证，块级平面布局待 MCHPRS 验证：
 
-| 门 | 仿真 | 游戏内 | 阻塞原因 |
-|----|------|--------|---------|
-| **XOR** | ✅ | ❌ | 需 2×AND + NOT + OR 组合，门间线互连复杂 |
-| **Half Adder** | ✅ | ❌ | XOR + AND 组合，Y+1 级灰路由与 OR 线冲突 |
-| **Full Adder** | ✅ | ❌ | HA 链 + 进位桥，规模超出单脚本可靠建造 |
-| **Ripple-Carry Adder** | ✅ | ❌ | 同上 |
+| 门 | 逻辑仿真 | MCHPRS 块级 | 下一步 |
+|----|---------|------------|--------|
+| **XOR** | ✅ | ⏳ | 用平面墙上火把 + `STRONG_POWER_STRAIGHT` 规则布线 |
+| **Full Adder** | ✅ | ⏳ | 2×XOR + 2×AND + OR，门间留足间距（`NO_COORD_OVERLAP`） |
+| **Ripple-Carry Adder** | ✅ | ⏳ | 全加器链，进位灰同层直连 |
 
-> **核心结论**：单门和门链（≤4 个火把，≤2 级深度）可手写逐块坐标验证。复杂多门组合（XOR/HA/FA）的手工布线不可靠——需要通过 **Nucleation + MCHPRS 块级仿真引擎**生成和验证完整块布局后再建造。
+> **核心结论**：可靠路径是 **nucleation.Schematic 建块 → MCHPRS 仿真真值表 → 导出 litematic 游戏内一次性粘贴**。手工逐块 /setblock 受命令速率（`CMD_RATE_LIMIT`）、区块加载（`SETBLOCK_LOAD_RADIUS`）、坐标重叠（`NO_COORD_OVERLAP`）三重限制，不适合大规模电路。门布局必须遵守 MCHPRS 仿真规则（站立火把同层、强充能直线段）。
 
 ## 电路编码格式规范
 
@@ -1439,3 +1483,51 @@ for b in circuit["blocks"]:
     schem.set_block((x, y, z), b["block"])
 schem.save("and_gate.schematic")
 ```
+
+## 大规模电路综合管道（redstone3d 包）
+
+超出手写规模（>几门）时，用 `mcp-server/scripts/redstone3d/` 的自动综合管道：
+**Verilog → yosys 综合 → 标准单元库 → 三维布局 → 迷宫布线 → 分层验证 → litematic**。
+
+### 模块与流程
+
+```
+yosys_frontend.py  Verilog → yosys+abc(-g AND,OR,NAND,NOR) → 门级 netlist
+                   全加器 19门手写NAND展开 → 7门；8-bit ALU → 160门
+cell_library.py    MCHPRS验证过的标准单元(统一引脚:输入西/输出东,全y=0)
+                   NOT/BUF/OR/AND/NAND/NOR 各4/4。输入引脚用 repeater(侧向进入安全)
+placer.py          拓扑分层布局(X=逻辑深度,Z=同层并排),体素占用防重叠
+maze_router.py     Lee迷宫布线 + rip-up&reroute(协商式拥塞),扇出树形
+synth.py           netlist→place→route→Schematic + redstone_block输入注入
+mchprs_sim.py      逐向量重建world仿真(redstone_block注入,4ms/向量)
+regress.py         分层验证:物理(每cell MCHPRS 4/4) + 逻辑(netlist行为仿真)
+```
+
+### 关键规则（血泪实测）
+
+| 规则 | 内容 |
+|------|------|
+| `YOSYS_ABC_GATES` | `abc -g AND,OR,NAND,NOR` 映射到可建门集；yosys 大幅优化门数/扇出 |
+| `MCHPRS_INPUT_INJECT` | lever/set_lever_power/set_signal_strength **不驱动**网络；只能用 `redstone_block`放置/移除注入，每向量重建 world |
+| `OPTIMIZE_TRUE` | `create_with_options(schem, True, False)` 绕过 `optimize=False` 的 255-default-input 上限 |
+| `FANOUT_FROM_WIRE` | 扇出分叉必须从 **wire** 而非 pin（repeater/门不横向导通） |
+| `DIAGONAL_RAMP_SHORT` | 红石线斜上/斜下连接：不同 net 的线在对角位置**短路**。布线 keep-out 必须查对角，否则连通图污染 |
+| `NO_FLOATING_DUST` | 悬空红石线（下方无实心块）让 redpiler **卡死**；每 wire 下必有支撑，且垂直移动重惩罚强制平面布线 |
+| `DUST_DENSITY_ON2` | 密集红石粉图边数 O(N²)（N×N 实心 dust ≈ N² 边，是 dust 全互连的语义正确行为，**非 bug**）。布线越密集 create 越慢。对策：布线减 dust 密度（短路径/留间距）+ 大电路用分层验证免整体仿真 |
+
+### 分层验证（突破规模上限的核心）
+
+大电路整体 MCHPRS 编译因密集 dust 的 O(N²) 图而变慢。改为两段独立证明：
+- **物理层**：每个 cell 类型在 MCHPRS 验证真值表一次（小电路，秒过）
+- **逻辑层**：netlist 用纯 Python 行为仿真（组合逻辑精确，无规模上限）
+
+物理正确 ∧ 逻辑正确 ⟹ 整体正确。已验证：全加器 8/8、8-bit ALU 80/80（AND/OR/ADD/XOR/SUB 各16组）。可扩展到整个 RISC-V。
+
+### 已达成
+
+| 电路 | 门数 | 验证 |
+|------|------|------|
+| 全加器 | 7（yosys优化） | 分层 8/8 + litematic导出 933B |
+| 8-bit ALU | 160 | 分层 80/80 |
+
+> **规模瓶颈**：整体布线（rip-up）在 >100 门时慢（分钟级），密集 dust 让整体 MCHPRS 仿真的图 O(N²) 增大。分层验证绕过整体仿真；大电路整体布线优化（分块布线/减 dust 密度/更快算法）为后续项。

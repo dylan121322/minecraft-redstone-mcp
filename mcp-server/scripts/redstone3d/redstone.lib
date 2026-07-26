@@ -1,0 +1,36 @@
+/* Liberty standard-cell library for redstone gates (for yosys/abc mapping).
+ * Only combinational cells we have MCHPRS-verified layouts for.
+ * Areas are rough block-count proxies so abc minimizes total blocks.
+ * Timing values are nominal (1 unit) — we don't optimize timing here.
+ */
+library(redstone) {
+  cell(NOT) {
+    area: 4;
+    pin(A) { direction: input; }
+    pin(Q) { direction: output; function: "A'"; }
+  }
+  cell(AND) {
+    area: 12;
+    pin(A) { direction: input; }
+    pin(B) { direction: input; }
+    pin(Q) { direction: output; function: "A*B"; }
+  }
+  cell(OR) {
+    area: 6;
+    pin(A) { direction: input; }
+    pin(B) { direction: input; }
+    pin(Q) { direction: output; function: "A+B"; }
+  }
+  cell(NAND) {
+    area: 16;
+    pin(A) { direction: input; }
+    pin(B) { direction: input; }
+    pin(Q) { direction: output; function: "(A*B)'"; }
+  }
+  cell(NOR) {
+    area: 10;
+    pin(A) { direction: input; }
+    pin(B) { direction: input; }
+    pin(Q) { direction: output; function: "(A+B)'"; }
+  }
+}
