@@ -32,16 +32,52 @@ riscv_synth/
 All 6 gate types (NOT/BUF/AND/OR/NAND/NOR) have MCHPRS-verified physical layouts (4/4 each).
 Netlist-level logic is verified by the redstone3d behavioral simulator.
 
-## Semi-Automatic Build Mode
+## Fully-Automatic Routing (PathFinder negotiated congestion)
 
-The fully automatic maze router is suitable for modules ~10 gates. Beyond that,
-use the **placement-only** mode which generates:
+Modules are **automatically routed** — no manual wiring — using PathFinder-style
+negotiated-congestion routing (`maze_router.route_negotiated`), offloaded to a
+32-thread Windows box for the compute-heavy iterations.
 
-1. **`.litematic` file** — cell instances placed + floor substrate + I/O lamps at port positions
-2. **`_wiring.json` file** — netlist connection map (which cell output connects to which cell input)
+### Auto-routed module results (all LEGAL, shared=0)
 
-These are exported to `../../schematics/` for in-game import via Litematica mod.
-Inter-cell wiring is done manually in-game following the wiring map.
+| Module        | Gates | Wires  | Iters | Time  | Status |
+|---------------|-------|--------|-------|-------|--------|
+| Control       | 22    | 803    | 84    | 47s   | LEGAL ✅ |
+| Mux_2to1      | 25    | 1155   | 67    | 62s   | LEGAL ✅ |
+| ALU_Control   | 31    | 1799   | 68    | 131s  | LEGAL ✅ |
+| Imm_Gen       | 32    | 2210   | 63    | 189s  | LEGAL ✅ |
+| Forwarding    | 92    | 13803  | 49    | 146s  | LEGAL ✅ (portfolio) |
+| ALU           | 197   | —      | —     | —     | hard case (see below) |
+
+Each produces a fully-wired `.litematic` (cells + routed redstone + repeaters)
+ready for direct in-game paste via Litematica — no manual wiring.
+
+### Routing algorithm
+
+- **`route_negotiated`** — serial PathFinder: every net reroutes against a
+  present-cost + history-cost field; congested voxels get pricier each iteration
+  until routing is legal (zero shared voxels). Converges reliably for ≤90 gates.
+- **`route_solve.py` (portfolio)** — for dense modules, runs N parallel variants
+  with escalating history-increment `{1,2,4}` × spacings `{10,16,24}` × seeds;
+  first variant to legalize wins. Saturates all cores AND guarantees convergence
+  (Forwarding legalized via `hist_inc=4.0` in 49 iters).
+- **A\* corridor bounding** — each net's search is bounded to its bounding-box +
+  margin with a Manhattan heuristic, keeping per-net routing fast on large chips.
+
+### Windows compute offload
+
+yosys synthesis runs on the Mac (fast); the heavy routing runs on Windows
+(9950X3D, 32 threads). Netlists ship as JSON; `route_solve.py` / `batch_route.py`
+run the portfolio there. `route_job.py` handles single-module jobs.
+
+### Known hard case: ALU (197 gates)
+
+The 8-bit ALU has 2× Forwarding's gate count with dense interconnect. Even the
+16-variant portfolio (600 iters each, ~3.5 CPU-hours) did not legalize it —
+the placement is too congested for the router to find non-shorting paths.
+**Fix path**: improve placement (wider dedicated routing channels, or split the
+ALU into per-bit slices routed independently then composed). Logic is verified
+(80/80); only physical routing at this density remains.
 
 ## Usage
 
