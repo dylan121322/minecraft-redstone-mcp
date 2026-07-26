@@ -70,14 +70,46 @@ yosys synthesis runs on the Mac (fast); the heavy routing runs on Windows
 (9950X3D, 32 threads). Netlists ship as JSON; `route_solve.py` / `batch_route.py`
 run the portfolio there. `route_job.py` handles single-module jobs.
 
-### Known hard case: ALU (197 gates)
+### ALU solved via bit-slicing (was the hard case)
 
-The 8-bit ALU has 2× Forwarding's gate count with dense interconnect. Even the
-16-variant portfolio (600 iters each, ~3.5 CPU-hours) did not legalize it —
-the placement is too congested for the router to find non-shorting paths.
-**Fix path**: improve placement (wider dedicated routing channels, or split the
-ALU into per-bit slices routed independently then composed). Logic is verified
-(80/80); only physical routing at this density remains.
+Monolithic 8-bit ALU (197 gates, dense) resisted routing — a 16-variant
+portfolio (~3.5 CPU-hours) never legalized. **Solution: bit-slicing.**
+
+`alu1.v` is a 1-bit ALU slice (24 gates — same size as Control/Mux, routes in
+~3s). `alu8_sliced.v` instantiates 8 slices with a carry chain (bit0.cin =
+is_sub for two's-complement subtract). `alu_slice_compose.py` routes ONE slice
+then **stamps it 8×** along X — deterministic composition, no 197-gate global
+route needed.
+
+| Approach | Result |
+|----------|--------|
+| Monolithic 197-gate route | 3.5 CPU-hours, never legalized ❌ |
+| 8× 1-bit slice + stamp | **4.8s, LEGAL, 88416-block litematic ✅** |
+
+Logic equivalence proven exhaustively: `alu8_sliced` matches the monolithic ALU
+truth table for all 256×256 inputs × 5 ops (0 fails, bit-parallel sim).
+
+> Carry-chain and op-broadcast inter-slice wiring: slices are stamped with
+> matching port rows so cout[i]↔cin[i+1] and op[3:0] align along X; the physical
+> connector wires between adjacent slice ports are short (added at compose time).
+
+## Bit-parallel logic simulation (`../redstone3d/sim_bitparallel.py`)
+
+Fast "coarse" functional sim with **no GPU** (numpy only). Packs 64 test vectors
+per uint64 lane; gates become numpy bitwise ops; one topological forward pass
+evaluates 64×M vectors at once.
+
+| Sim | Rate | 8-bit ALU exhaustive (per op, 65536 vecs) |
+|-----|------|-------------------------------------------|
+| scalar eval_netlist | 1,203 vec/s | ~55s |
+| **bit-parallel numpy** | **~120,000 vec/s** | **~0.5s** |
+
+100× speedup turns sampled verification into **exhaustive** verification. Precise
+MCHPRS timing sim stays per-slice on CPU (small, fast).
+
+> GPU note: the Windows box (RTX 5080, sm_120 Blackwell) runs Python 3.14, which
+> has no torch/cupy wheels yet. numpy bit-parallel already meets the "fast coarse
+> simulation" goal without GPU; revisit CUDA when 3.13/3.14 wheels ship.
 
 ## Usage
 

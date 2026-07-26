@@ -87,8 +87,13 @@ def to_netlist(yosys_json: dict, module: str = None) -> dict:
                 outputs.append(nn)
 
     # cells
+    # yosys emits non-logic metadata cells (e.g. $scopeinfo from generate blocks)
+    # that carry no signal — skip them.
+    IGNORE = {"$scopeinfo", "$specify2", "$specify3", "$specrule"}
     for cname, cd in m["cells"].items():
         ctype = cd["type"]
+        if ctype in IGNORE:
+            continue
         if ctype not in GATE_MAP:
             raise ValueError(f"unmapped gate type {ctype!r} in {cname}; "
                              f"extend GATE_MAP / abc gate set")
