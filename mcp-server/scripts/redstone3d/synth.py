@@ -17,10 +17,11 @@ S = "minecraft:stone"
 
 
 def synthesize(netlist: dict, origin: Pos = (0, 0, 0)):
-    """Return (placement, route, build_fn). build_fn(schem, input_values) emits
-    the full circuit with redstone_block inputs per input_values."""
-    pl = place(netlist, origin=origin)
-    route = MazeRouter(pl).route()
+    """Return (placement, route, build_fn).
+    Uses 5-pass rip-up: fast enough for small modules (<50 gates),
+    enough retries to resolve typical congestion."""
+    pl = place(netlist, origin=origin, col_gap=10, row_gap=6)
+    route = MazeRouter(pl, margin=10).route(max_iters=5)
 
     # Precompute floor extent
     mn, mx = pl.bounds

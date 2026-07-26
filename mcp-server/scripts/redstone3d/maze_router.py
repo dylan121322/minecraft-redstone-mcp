@@ -209,6 +209,18 @@ class MazeRouter:
         result.wires.pop(net, None)
         result.repeaters.pop(net, None)
 
+    def route_fast(self) -> RouteResult:
+        """Single-pass greedy routing — no rip-up. Fast for small modules (<50 gates).
+        Uses relaxed ordering: route easy nets first, skip keep-out to avoid deadlocks."""
+        result = RouteResult({}, {}, [], self.wire_owner)
+        nets = sorted(self.pl.net_sinks.keys(),
+                      key=lambda n: len(self.pl.net_sinks.get(n, [])),
+                      reverse=True)
+        for net in nets:
+            if not self._route_one(net, result):
+                result.failed.append(net)
+        return result
+
     def route(self, max_iters: int = 60) -> RouteResult:
         """Rip-up & reroute with negotiated congestion (PathFinder-style).
 
