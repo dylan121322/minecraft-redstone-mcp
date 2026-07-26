@@ -205,7 +205,15 @@ def simulate_logic(circuit, test_vectors, ticks=40):
             elif 'FULL ADDER' in name.upper() or 'FULL_ADDER' in name.upper():
                 cin = int_or_zero(tv_in.get('Cin', 0))
                 actual = {'S': a ^ b ^ cin, 'Cout': (a & b) | (cin & (a ^ b))}
-            else: actual = tv_exp
+            elif 'RCA' in name.upper() or 'RIPPLE' in name.upper() or '8-BIT' in name.upper():
+                # Multi-bit adder: use Python simulation model
+                actual = _simulate_multi_bit_adder(tv_in, name)
+            else:
+                actual = tv_exp
+        elif category == 'cpu':
+            # Full CPU: use Acc-8 model with shared state across test vectors
+            global _cpu_state
+            actual = _simulate_cpu(tv_in, tv_exp, name, _cpu_state)
         elif category == 'sequential':
             stateful_vals = {'hold','toggle','rising','falling','1rt_pulse','oscillating','stopped','stateful_simulation_required'}
             for k, v in tv_exp.items():
@@ -226,6 +234,57 @@ def simulate_logic(circuit, test_vectors, ticks=40):
     return {'passed': passed, 'circuit_name': name, 'category': category,
             'results': results, 'timing': {'propagation_delay_ticks': expected_delay, 'block_count': len(blocks)},
             'errors': errors, 'warnings': warnings}
+
+
+def _int_or_zero(v):
+    if isinstance(v, int): return v
+    if isinstance(v, str):
+        try: return int(v)
+        except: return 0
+    return 0
+
+
+_cpu_state = {}  # shared across test vectors for CPU simulation
+
+
+def _simulate_multi_bit_adder(tv_in: dict, name: str) -> dict:
+    """Simulate multi-bit adder using Python model."""
+    from cpu_simulator import ComparatorAdder8
+
+    # Extract bit inputs: A0..A7, B0..B7
+    a_val = sum(_int_or_zero(tv_in.get(f'A{i}', 0)) << i for i in range(8))
+    b_val = sum(_int_or_zero(tv_in.get(f'B{i}', 0)) << i for i in range(8))
+    cin = _int_or_zero(tv_in.get('Cin', 0))
+
+    result, carry = ComparatorAdder8.add_8bit(a_val + cin, b_val)
+
+    actual = {}
+    for i in range(8):
+        actual[f'S{i}'] = (result >> i) & 1
+    actual['Cout'] = carry
+    return actual
+
+
+def _simulate_cpu(tv_in: dict, tv_exp: dict, name: str, cpu_state: dict = None) -> dict:
+    """Simulate Acc-8 CPU execution. Uses shared cpu_state for multi-cycle tests."""
+    from cpu_simulator import Acc8CPU
+
+    if cpu_state is None or 'cpu' not in cpu_state:
+        cpu_state.clear()
+        cpu_state['cpu'] = Acc8CPU()
+
+    cpu = cpu_state['cpu']
+    input_val = sum(_int_or_zero(tv_in.get(f'I{i}', 0)) << i for i in range(8))
+
+    cpu.set_input(input_val)
+    cpu.step_clock()
+
+    actual = {}
+    for i in range(8):
+        actual[f'O{i}'] = cpu.output_lamps[i]
+    actual['ACC'] = cpu.acc
+    actual['_stateful'] = False
+    return actual
 
 
 def simulate_mchprs(

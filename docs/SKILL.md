@@ -125,6 +125,36 @@ description: Use when the agent needs to design, describe, simulate, or generate
 | `NO_FILL_Y` | 不得 `/fill` 清除 Y 层（地面层）——只能清除 Y+1 及以上 | 输入灰和安装石被摧毁，火把无支撑 |
 | `NO_DESTROY_INPUTS` | 测试输入时使用 `redstone_block`/`air`（不带 `destroy`），不得用 `air destroy` | `destroy` 模式可能摧毁相邻电路方块 |
 
+### MC-31100 修复：/setblock 红石元件不激活（已解决，2026-07-25）
+
+**原生 bug**：`/setblock` 放置的红石元件（中继器、比较器、红石灯、红石粉等）不会检测已存在的邻居电源，导致放下去不通电。玩家手动放置则正常——因为手动放置会触发 `neighborChanged` + 二极管的 `checkTickOnNeighbor`。
+
+**解决方案**：Forge 1.21.4 mod `redstone-update-mod`（源码 `~/project/redstone-update-mod/`），通过 mixin 注入 `SetBlockCommand.setBlock` 的 `@At("RETURN")`：
+
+```
+1. 对红石元件调 level.neighborChanged(pos, neighborBlock, null) × 6 方向 → 灯/灰/火把检测电源
+2. level.updateNeighborsAt + sendBlockUpdated → 通知邻居 + 刷新渲染
+3. 中继器/比较器（DiodeBlock）额外用 @Invoker 调原生 checkTickOnNeighbor → 让二极管自己判断输入并调度 tick 更新 POWERED
+```
+
+| 元件 | 修复后 `/setblock` 行为 | 验证 |
+|------|------------------------|------|
+| 红石灯 | 检测邻居电源即时点亮 | ✅ |
+| 红石粉 | 检测电源 → power=15 | ✅ |
+| 中继器/比较器 | 检测输入 → 通电 → 驱动下游 | ✅ |
+
+> **前置条件**：该 mod 必须已装入 `~/Library/Application Support/minecraft/mods/`。无 mod 时 `/setblock` 电路不通，须回退到玩家物理放置（`bot.placeBlock`，1.21.4 有 timeout 问题）。
+> **失败排查**：`DiodeBlock.checkTickOnNeighbor` 只在 `willTickThisTick==false` 时调度 tick——**不要**自己抢先 `scheduleTick`,否则会阻止原生更新。必须调原生方法让它自判。
+
+### ⚠️ 验证陷阱（血泪教训，2026-07-25）
+
+**这两个陷阱曾导致连续十几轮误判 mod "失败",实际 mod 早就工作了。**
+
+| 陷阱 | 错误做法 | 正确做法 |
+|------|---------|---------|
+| **客户端缓存滞后** | 用 `bot.blockAt(pos)._properties` 读状态——这是 **Mineflayer 客户端缓存**,服务端方块已更新但客户端包未到,读出的是旧值 | 用**服务端查询** `/execute if block <pos> <block>[state=val] run say MARKER`,监听 `MARKER` 消息 |
+| **中继器朝向反了** | 以为 `facing` 是输出方向 | `facing` 是**输入方向**：`getInputSignal` 读 `pos.relative(facing)`。红石块在西 → 中继器要 `facing=west`(输入朝西对准电源),输出在东 |
+
 ### 区块加载约束（强制）
 
 **Bot 只能读取已加载区块内的方块状态。**
@@ -957,18 +987,417 @@ function nandGate(bx, by, bz) {
 
 ## 完整工作流
 
+**四步流程：设计 → 写设计代码 → 模拟 → 实践**
+
 ```
-用户需求："在(100,64,200)做一个4位加法器"
+用户需求："做一个 4-bit CPU"
   ↓
-1. 识别：算术电路 → 行波进位加法器(4bit)
-2. 查找模板：全加器 + ripple-carry 参数化模板
-3. 生成电路 JSON（含 truth_table）
-4. simulateRedstoneCircuit(circuit=<JSON>, autoTest=true)
-  → passed: true, delay: 24rt
-5. buildRedstoneCircuit(circuit="RIPPLE_CARRY_ADDER", x=100, y=64, z=200, bits=4, facing="east")
-  → 生成 /setblock 命令 → Bot 逐块放置
+【第一步：设计】
+  ISA 定义（字长/指令/寄存器）
+  → 数据通路设计（寄存器→ALU→总线→输出）
+  → 控制逻辑（时序/状态机/时钟频率）
+  → 物理布局（位片/总线位置/Y层分工）
+  ↓
+【第二步：写设计代码】
+  生成结构化 JSON（逐块坐标 + 角色标注 + 真值表）
+  → blocks 数组：每块的 pos + block_id + state + role
+  → inputs/outputs 端口定义
+  → truth_table 验证向量
+  ↓
+【第三步：模拟】
+  调 nucleation 引擎仿真（Nucleation SchematicBuilder + CircuitBuilder）
+  → 遍历 truth_table 所有输入组合
+  → 每组合运行 FixedTicks(40)
+  → 采集输出 → 与预期对比
+  → PASS: 进入第四步
+  → FAIL: 回第一步修正设计
+  ↓
+【第四步：实践】
+  buildRedstoneCircuit → 生成 /setblock 命令序列
+  → Bot 在游戏中逐块放置（CMD_DELAY=200ms + Y层排序）
+  → 服务端查询验证（/execute if block ... run say）
   ✅ 完工
 ```
+
+---
+
+## 红石计算机架构设计方法
+
+> 2026-07-25 实战验证：基于 HashDG Fibonacci 计算机（984 块，4-bit）反向工程 + 游戏内建造测试通过（5/5 灯亮）。
+
+### 设计方法论：从 ISA 到 Schematic
+
+红石计算机的设计与真实 CPU 设计流程同构——本质上是从指令集架构（ISA）到寄存器传输级（RTL）再到物理布局的逐层细化：
+
+```
+ISA 定义 → 数据通路设计 → 控制逻辑 → 时序分析 → 物理布局
+```
+
+### 核心组件目录
+
+红石计算机由以下基本组件构成，每个都有 Minecraft 中的标准实现方式：
+
+#### 1. 寄存器（Register）— 存储单元
+
+**原理**：锁存中继器（`locked=true`）在锁定后保持输出信号不变，构成 1-bit 存储。
+
+```
+实现：repeater[facing=east,locked=true]
+写入：解锁 → 信号输入 → 锁定（锁存）
+读取：中继器输出端永远反映存储值
+```
+
+每个 4-bit 寄存器需要 4 个中继器（每个 bit 一个），垂直排列或水平排列。解锁/锁定信号通过独立的控制线传递。
+
+**关键约束**：
+- 锁存中继器的 `locked` 输入端（侧面）接到控制火把
+- 写入前必须先解锁，写入完成后锁定
+- 解锁→写入→锁定的最小时间窗口 = 2rt（2 个红石刻）
+
+#### 2. ALU（算术逻辑单元）— 计算核心
+
+**原理**：红石比较器在减法模式下实现信号强度运算。
+
+```
+比较器 subtract 模式：output = max(0, rear - max(sideA, sideB))
+
+关键公式：
+- 信号传送：直接线连，信号强度 = 源强度 - 距离衰减
+- 常数生成：红石块 = 15，红石火把 = 15（墙面火把 lit=true）
+- 减法：比较器 rear=15, side=value → output=15-value
+- 加法（通过两次减法）：A + B = 15 - ((15 - A) - B)
+```
+
+**Fibonacci 计算机中的实现**：
+- 两个比较器串行（第一级：rear=15, side=RegA → 15-A；第二级：rear=第一级输出, side=RegB → (15-A)-B）
+- 再经过一个比较器取反 → A+B
+
+#### 3. 总线（Bus）— 数据传输
+
+**原理**：红石粉沿一个方向排列，多个组件连接到同一条线。
+
+```
+物理总线：Z=常量的一条红石粉线（如 Z=8 从 X=1 到 X=15）
+连接方式：组件输出通过中继器（二极管隔离）接入总线
+多个驱动源：分时复用（控制逻辑保证同一时刻只有一个写入）
+```
+
+**规则**：
+- 总线上的每个写入端必须有中继器隔离（防止反向馈电）
+- 总线读取端可以直接连线
+- 同一时刻只能有一个设备驱动总线
+
+#### 4. 控制单元（Control Unit）— 时序中枢
+
+**原理**：红石火把 + 中继器延迟链生成控制信号序列。
+
+```
+时钟源：
+- note_block + observer：手动单步（每次右键一个脉冲）
+- 中继器环形振荡器：自动时钟（2×delay rt 周期）
+- 活塞 + observer：自动时钟（扩展+收回各触发一次）
+
+控制信号生成：
+- 火把 NOT 门 → 反相
+- 中继器延迟链 → 多相时钟
+- 火把 burnout 保护：中继器 delay≥2 抑制高频
+```
+
+**Fibonacci 计算机的时钟方案**：
+- 3 个 note_block + observer 提供三条独立的控制脉冲线
+- 一条控制"手动步进"，一条控制"自动时钟开关"，一条控制"复位"
+- reset 通过活塞推动 purpur_block 来切断时钟信号
+
+#### 5. 输出显示（Output Display）
+
+**原理**：红石灯直接接到输出总线的每一位。
+
+```
+每位输出 = 1 个 redstone_lamp
+N-bit 输出 = N 个 lamp 垂直或水平排列
+二进制显示：从上到下 = MSB → LSB
+```
+
+### Fibonacci 计算机架构案例
+
+这是实战验证过的唯一完整计算机架构，984 块，16×14×20 尺寸。
+
+#### 物理布局（俯视图）
+
+```
+Z=19  ┌──────────────────────────────────┐
+Z=18  │  数据寄存器 B (X=6)              │
+Z=17  │  RegB 输出灯                     │
+Z=16  │  锁存使能控制线                  │
+Z=15  │  信号交叉点                      │
+Z=14  │  ALU 第二级（比较器链）          │
+Z=13  │  ALU 第一级                       │
+Z=12  │  常数 15 参考（火把）            │
+Z=11  │  控制脉冲生成                     │
+Z=10  │  purpur_block 时钟隔离           │
+Z=9   │  数据寄存器 A (X=4)              │
+Z=8   │  ===== 主数据总线 =====          │
+Z=7   │  寄存器写入选择器                 │
+Z=6   │  信号路由交叉                     │
+Z=5   │  lamp 输出位 3                    │
+Z=4   │  寄存器读取使能                   │
+Z=3   │  lamp 输出位 0                    │
+Z=2   │  控制面板（note_block×3+木牌）   │
+Z=1   │  活塞 + observer 时钟发生器       │
+Z=0   │  结构基底（混凝土）              │
+      └──────────────────────────────────┘
+      X=0                           X=15
+```
+
+#### 位片结构（侧视图，以 bit 0 为例）
+
+```
+Y=11  [lamp] ← 输出显示
+Y=10   ─┬─ 垂直信号线（进位传递）
+Y=9    ├── 位 3 数据寄存器 A (repeater locked)
+Y=8    ├── 主数据总线（水平红石粉 Z=8）
+Y=7    ├── 位 2
+Y=6    ├── 控制脉冲（火把）
+Y=5    ├── 位 1
+Y=4    │   寄存器 B (comparator + repeater)
+Y=3    ├── 位 0 数据寄存器
+Y=2    │   控制逻辑层（comparator + torch）
+Y=1    ├── 时钟输入（observer → 脉冲）
+Y=0    └── 结构基底
+```
+
+每个 bit 垂直占据 2 个 Y 层（奇数层=数据，偶数层=控制），5 个 bit 共占用 Y=3 到 Y=11。
+
+#### Fibonacci 算法硬件实现
+
+```
+算法伪代码：
+  R1 = 0, R2 = 1          // 初始值（硬连线）
+  LOOP:
+    display(R2)           // 输出当前值
+    tmp = R1 + R2         // ALU 计算
+    R1 = R2               // 移位
+    R2 = tmp              // 存储新值
+
+硬件实现：
+  1. Comparator chain at X=6-14 computes R1+R2 via signal strength subtraction
+  2. Result feeds into register B at X=6 via repeater latch
+  3. Old R2 value moves to register A at X=4 (via bus at Z=8)
+  4. R2 lamp at X=5 displays current Fibonacci number
+  5. Clock pulse advances to next iteration
+```
+
+### 设计方法：从零开始设计一个红石计算机
+
+参考 Hennessy & Patterson 的"量化研究方法"改编为红石领域：
+
+#### Phase 1：指令集架构 (ISA) 定义
+
+决定计算机做什么、怎么做：
+
+```
+1. 字长：4-bit 还是 8-bit？（影响所有组件规模）
+2. 指令数：需要哪些操作？（ADD, SUB, LOAD, STORE, JUMP...）
+3. 寄存器数：几个通用寄存器？
+4. 寻址模式：立即数、直接寻址、寄存器间接？
+5. I/O：输入方式（拉杆/按钮）和输出方式（灯/7段管）
+```
+
+#### Phase 2：数据通路设计
+
+画出数据如何流动：
+
+```
+1. 寄存器堆 → 画出每个寄存器的宽度和位置
+2. ALU → 确定算术操作的比较器链拓扑
+3. 总线 → 规划共享数据通路（宽多少格、位置在哪）
+4. 多路复用 → 如何选择哪个寄存器驱动总线
+5. 画出数据流图：RegA→Bus→ALU→RegB
+```
+
+#### Phase 3：控制逻辑设计
+
+时序和状态机：
+
+```
+1. 指令周期 = 取指 + 译码 + 执行 + 写回（每步 2-4rt）
+2. 控制信号表：对每条指令列出所有控制信号
+3. 状态机：用火把+中继器链实现状态序列
+4. 时钟频率 = 最长控制路径延迟（**测量，不要估计**）
+```
+
+#### Phase 4：物理布局
+
+块的物理放置：
+
+```
+1. 位片布局：每个 bit 一个垂直切片（便于布线）
+2. 数据总线居中：所有组件通过中继器接入
+3. Y 层分工：奇数=数据（总线、寄存器），偶数=控制（火把、脉冲）
+4. 非导电隔离：混凝土/玻璃保证信号不串扰
+5. 标牌标注：用电线连接处的 oak_wall_sign 标记信号名
+```
+
+#### Phase 5：构建与验证
+
+```
+1. 最小可行产品：先建 1-bit 通路验证 ALU+寄存器工作
+2. 扩展到 N-bit：复制位片 N 次
+3. 单步测试：用 note_block observer 手动触发每个指令
+4. 自动化测试：用 bot /execute if block 查询每个 lamp
+```
+
+### 关键设计约束
+
+| 约束 | 值 | 设计影响 |
+|------|-----|---------|
+| 信号最大距离 | 15 格（无中继器刷新） | 总线超过 15 格必须加中继器 |
+| 中继器延迟 | 1-4 rt（可调） | 每条控制路径的延迟 = Σ 沿途中继器的 delay |
+| 火把 burnout | >8 次闪烁/秒 永久熄灭 | 时钟频率必须 < 4Hz（周期 >5rt） |
+| 比较器延迟 | 1 rt（固定） | 减法运算需要 2rt（2 级串行比较器）|
+| 锁存中继器 | 锁定后不更新 | 写入前必须解锁至少 1rt |
+| 活塞延迟 | 3-4 gt（1.5-2 rt） | 不适合高频时钟，适合复位/使能 |
+| 充能规则 | 强充能传递 15 信号 | 红石块直接邻接 = 强充能 = 信号 15 |
+
+### 已验证可用的计算机模板
+
+| 计算机 | 位宽 | 块数 | 指令 | 时钟 | 验证 | 特点 |
+|--------|------|------|------|------|------|------|
+| **Fibonacci 计算机** (HashDG) | 4-bit | 984 | ADD only (硬连线) | note_block 手动 | ✅ 5/5 灯亮 | 2 寄存器 + 累加器 |
+| **RCA-8** (合成) | 8-bit | 143 | — | — | ✅ 模拟 8/8 | 纯组合逻辑加法器 |
+| **Acc-8 CPU** (合成) | 8-bit | 605 | LOAD/ADD/CLEAR | 手动步进 | ✅ 模拟 8/8 | 累加器架构，Python 仿真通过 |
+
+---
+
+## 红石显示系统设计
+
+> 2026-07-25：为"视频显示机器"目标设计。从 Fibonacci 计算机和 DIKC-4 架构中提取可复用模式。
+
+### 显示系统架构
+
+```
+┌──────────┐    ┌──────────┐    ┌────────────────┐
+│  CLOCK   │───▶│ ADDRESS  │───▶│  FRAME ROM     │
+│ Generator│    │ COUNTER  │    │ (analog sig.)  │
+└──────────┘    └────┬─────┘    └───────┬────────┘
+                     │                  │
+                     ▼                  ▼
+              ┌──────────────────────────────────┐
+              │     DISPLAY CONTROLLER           │
+              │  ┌────────────┐ ┌────────────┐   │
+              │  │ROW DECODER │ │COL DECODER │   │
+              │  │(4→16 comp.)│ │(4→16 comp.)│   │
+              │  └────────────┘ └────────────┘   │
+              │         │            │            │
+              │         ▼            ▼            │
+              │    ┌─────────────────────┐        │
+              │    │   LAMP MATRIX       │        │
+              │    │     16×16 = 256     │        │
+              │    └─────────────────────┘        │
+              └──────────────────────────────────┘
+```
+
+### 组件设计
+
+#### 1. 地址计数器 (Address Counter)
+
+**原理**：T 触发器链，每个触发器输出频率为输入的 1/2。
+
+```
+8 个 T 触发器串联 → 256 状态（0-255）
+每个触发器 = 1× Dropper-Hopper TFF (3×3×3, ~12 blocks)
+总计：8 × 12 = ~96 blocks
+
+或使用 Observer+Repeater 环形计数器（更紧凑）
+```
+
+**设计约束**：
+- 时钟频率必须 < TFF 最大频率（~2.5 Hz，因 Dropper 延迟）
+- 计数器输出 = 8-bit 并行（每位一根红石线）
+
+#### 2. 帧 ROM (Frame ROM)
+
+**原理**：类似 DIKC-4 的信号强度编码存储器。
+
+```
+64 个"barrel"（每个 8 块）
+每 barrel 存储 4-bit 信号强度（0-15）
+地址输入 → 多路选择 → 输出对应 barrel 的信号强度
+
+DIKC-4 的指令 barrel 模式：
+  bottom barrel = opcode signal strength
+  top barrel = operand signal strength
+```
+
+**Frame ROM 适配**：
+- 2D 排列：8×8 barrel grid = 64 个存储单元
+- 每个输出 4-bit 信号强度
+- 地址 = 6-bit（高位=row，低位=col）
+- 读周期 = ~3rt（比较器选通 + 中继器锁存）
+
+#### 3. 行列解码器 (Row/Column Decoder)
+
+**原理**：比较器链实现 4-to-16 译码。
+
+```
+4-bit 输入 → 16 条输出线，每次只 1 条激活
+实现：16 个比较器，每个匹配不同的 4-bit 值
+每个比较器：rear=输入信号, side=基准值 → 匹配时输出=0
+
+简化方案（推荐）：
+  使用 target block（标靶）接收 address bus 信号
+  target 的 power 值直接驱动对应 lamp 列
+```
+
+#### 4. 灯矩阵 (Lamp Matrix)
+
+**原理**：N×M 红石灯网格，行列交叉选通。
+
+```
+16×16 = 256 lamps，排列方式：
+  行选择：水平红石线（16 条）
+  列选择：垂直红石线（16 条）
+  交叉点：中继器 + lamp
+  
+每个 lamp = 1 redstone_lamp + 1 repeater（隔离）
+总计 = 256 lamps + 256 repeaters + 32 wires ≈ 800 blocks
+```
+
+### 帧格式与 ROM 布局
+
+```
+16×16 帧 = 256 bits = 64 nibbles (4-bit each)
+ROM 组织：8 rows × 8 columns of barrels
+
+每个 nibble 映射到 frame 的一个 2×2 像素块（简并）
+或使用 8×8 每个 pixel 独立（单色）
+
+多帧动画：ROM 分成多个 bank，bank 地址 = 帧号高位
+例如：4 帧动画 = 256 nibbles = 1024 bits = 128 bytes ROM
+```
+
+### 建造估算
+
+| 模块 | 块数 |
+|------|------|
+| 灯矩阵 (16×16) | ~800 |
+| 行/列译码器 | ~200 |
+| 帧 ROM (64 nibbles) | ~500 |
+| 地址计数器 (8-bit) | ~100 |
+| 时钟 + 控制 | ~50 |
+| 结构/隔离 | ~350 |
+| **总计** | **~2000 blocks** |
+
+帧刷新率：64 步 × 0.5s/步 ≈ **32 秒/帧**（手动时钟）
+自动时钟（2 Hz）≈ **32 秒/帧** → **0.03 fps**
+
+### 已知限制
+
+- 红石灯有 2rt 点亮延迟（影响动画刷新）
+- 比较器译码器需要精确的信号强度校准
+- 大型灯矩阵的电源分配需要精心设计
+- 超 15 格需要中继器刷新（限制矩阵尺寸）
+- **MCHPRS 不仿真红石火把**（模拟器局限，不影响实际建造）
 
 ---
 
@@ -991,8 +1420,10 @@ function nandGate(bx, by, bz) {
 | 时序竞争 | 多路径延迟不匹配 | 用中继器对齐延迟 |
 | 反向馈电 | 输出信号回流到输入 | 级间放中继器(二极管) |
 | 活塞不同步 | 顶部/底部时序差 | 用中继器匹配延迟 |
-| 方向错误 | facing 参数不对 | 检查 facing 枚举值 |
+| 方向错误 | facing 参数不对（facing 是**输入**方向,非输出） | 电源在西 → 中继器 `facing=west` |
 | block state 语法错误 | 格式不对 | 用 `minecraft:block_id[key=val]` |
+| `/setblock` 红石元件不通电 | MC-31100，新方块不检测邻居电源 | 装 `redstone-update-mod`（见 /setblock 命令约束段） |
+| 误判方块状态（假"未通电"） | 读 `bot.blockAt` 客户端缓存滞后 | 用服务端 `/execute if block ... run say` 查询 |
 
 
 ## Nucleation 集成参考

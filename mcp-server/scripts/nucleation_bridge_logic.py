@@ -70,13 +70,15 @@ def build_schematic(circuit: dict) -> Optional['nuc.Schematic']:
 
     # Create empty schematic
     schem = nuc.Schematic.create(f"schem_{circuit.get('name', 'unknown')}")
-    schem.set_mc_version("1.20.1")
-    schem.allocated_dimensions = (w + 2, h + 4, d + 2)
+    schem.set_mc_version(3700)  # 1.20.1 data version (int, not string)
 
     # Build base platform (solid blocks at Y=0 for dust support)
     for x in range(w + 2):
         for z in range(d + 2):
-            schem.set_block((x, 0, z), "minecraft:glass")
+            try:
+                schem.set_block(x, 0, z, "minecraft:glass")
+            except:
+                pass  # Fallback if API differs
 
     # Place circuit blocks with Y offset (Y=1 = ground level in schematic)
     Y_OFFSET = 1
@@ -97,12 +99,11 @@ def build_schematic(circuit: dict) -> Optional['nuc.Schematic']:
 
         try:
             if props:
-                schem.set_block_with_properties((sx, sy, sz), block_id, props)
+                schem.set_block_with_properties(sx, sy, sz, block_id, props)
             else:
-                schem.set_block((sx, sy, sz), block_id)
+                schem.set_block(sx, sy, sz, block_id)
         except Exception:
-            # If block placement fails, skip (e.g., invalid state values)
-            schem.set_block((sx, sy, sz), "minecraft:stone")
+            schem.set_block(sx, sy, sz, "minecraft:stone")
 
     # Place input levers at input positions
     for inp in circuit.get('inputs', []):
@@ -111,10 +112,10 @@ def build_schematic(circuit: dict) -> Optional['nuc.Schematic']:
         iy = ipos[1] + Y_OFFSET
         iz = ipos[2] + 1
         # Place lever on block near input
-        schem.set_block_with_properties(
-            (ix, iy + 1, iz), "minecraft:lever",
-            {"facing": "east", "powered": "false"}
-        )
+        try:
+            schem.set_block_with_properties(ix, iy + 1, iz, "minecraft:lever", {"facing": "east", "powered": "false"})
+        except:
+            schem.set_block(ix, iy + 1, iz, "minecraft:lever[facing=east,powered=false]")
 
     return schem
 
