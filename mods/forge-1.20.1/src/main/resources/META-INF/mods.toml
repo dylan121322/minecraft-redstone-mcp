@@ -1,0 +1,17 @@
+modLoader = "javafml"
+loaderVersion = "[47,)"
+license = "MIT"
+
+[[mods]]
+modId = "redstone_update_fix"
+version = "1.0.0"
+displayName = "Redstone Update Fix"
+description = "Patches /setblock to trigger redstone updates (MC-31100)"
+authors = ["bodeMac"]
+
+[[dependencies.redstone_update_fix]]
+    modId = "forge"
+    mandatory = true
+    versionRange = "[47,)"
+    ordering = "NONE"
+    side = "BOTH"

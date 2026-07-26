@@ -1,0 +1,8 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "com.boqing.redstoneupdate.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": ["SetBlockCommandMixin", "DiodeBlockInvoker"],
+  "injectors": { "defaultRequire": 1 }
+}
