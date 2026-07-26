@@ -78,37 +78,99 @@ def main():
     mn, mx = pl.bounds
     sw = mx[0] - mn[0] + 1        # slice width (X)
     sd = mx[2] - mn[2] + 1        # slice depth (Z)
-    pitch = sw + 6               # X gap between slices
+    pitch = sw + 8               # X gap between slices (room for connector wires)
 
-    # port coordinates within one slice (relative to slice origin mn)
-    pi = pl.primary_inputs        # net -> (x,y,z)
-    po = pl.primary_outputs
-    print(f"[compose] slice {sw}x{sd}, inputs={list(pi)}, outputs={list(po)}", flush=True)
+    # port coordinates within one slice (relative to slice origin, mn=(0,0,0))
+    pi = pl.primary_inputs        # net -> (x,y,z)  — west edge
+    po = pl.primary_outputs       # net -> (x,y,z)  — east edge
+    pb = nl["port_bits"]
+    def netpos_in(port, i=0):
+        b = pb[port][i]; return pi[f"n{b}"]
+    def netpos_out(port, i=0):
+        b = pb[port][i]; return po[f"n{b}"]
+    cin_p  = netpos_in("cin")     # (0,0,4)
+    cout_p = netpos_out("cout")   # (192,0,1)
+    a_p    = netpos_in("a")       # (0,0,0)
+    b_p    = netpos_in("b")       # (0,0,2)
+    op_ps  = [netpos_in("op", i) for i in range(4)]  # z=6,8,10,12
+    y_p    = netpos_out("y")
+    print(f"[compose] slice {sw}x{sd} cin={cin_p} cout={cout_p} op={op_ps}", flush=True)
 
-    # Build the composed schematic: stamp 8 slices along X
     s = n.Schematic.create("alu8_sliced")
-    total_w = pitch * 8 + 10
-    s.fill_cuboid(mn[0]-3, -1, mn[2]-3, mn[0] + total_w, -1, mx[2]+3, "minecraft:stone")
+    total_w = pitch * 8 + 20
+    # extend floor in +Z for the op broadcast bus lanes below the slices
+    zbus0 = mx[2] + 2                     # op bus starts just south of slices
+    s.fill_cuboid(mn[0]-3, -1, mn[2]-3, mn[0] + total_w, -1, zbus0 + 12, "minecraft:stone")
+
+    def wire(x, y, z):
+        if y > 0: s.set_block_from_string(x, y-1, z, "minecraft:stone")
+        s.set_block_from_string(x, y, z, "minecraft:redstone_wire")
+
+    def rep(x, y, z, facing):
+        if y > 0: s.set_block_from_string(x, y-1, z, "minecraft:stone")
+        s.set_block_from_string(x, y, z, f"minecraft:repeater[facing={facing},delay=1]")
 
     def stamp(dx):
-        # cells
         for pc in pl.placed.values():
             ox, oy, oz = pc.origin
             pc.cell.emit(s, ox + dx, oy, oz)
-        # wires + support
         for net, ws in res.wires.items():
             for (x, y, z) in ws:
-                if y > 0:
-                    s.set_block_from_string(x + dx, y - 1, z, "minecraft:stone")
-                s.set_block_from_string(x + dx, y, z, "minecraft:redstone_wire")
+                wire(x + dx, y, z)
         for net, reps in res.repeaters.items():
             for (pos, f) in reps:
-                s.set_block_from_string(pos[0] + dx, pos[1], pos[2],
-                                        f"minecraft:repeater[facing={f},delay=1]")
+                rep(pos[0] + dx, pos[1], pos[2], f)
 
     for i in range(8):
         stamp(i * pitch)
     print(f"[compose] stamped 8 slices, {s.block_count()} blocks", flush=True)
+
+    # ---- Inter-slice connector wiring ----
+    # 1. Carry chain: slice[i].cout (east) -> slice[i+1].cin (west of next slice).
+    #    cout is at x=cout_p[0]+i*pitch ; next cin at x=cin_p[0]+(i+1)*pitch.
+    #    Route along a free Z lane (z = cin_p[2]) with repeaters every 15 blocks.
+    for i in range(7):
+        cout_abs = (cout_p[0] + i*pitch, cout_p[1], cout_p[2])
+        cin_abs  = (cin_p[0] + (i+1)*pitch, cin_p[1], cin_p[2])
+        # route: from cout east to a vertical Z lane at x just past this slice,
+        # down to cin's z, then east into next slice's cin
+        lane_x = mn[0] + i*pitch + sw + 2   # in the gap after slice i
+        # horizontal from cout to lane
+        z = cout_abs[2]
+        run = 0
+        for x in range(cout_abs[0]+1, lane_x+1):
+            wire(x, 0, z); run += 1
+            if run % 15 == 0: rep(x, 0, z, "west")
+        # vertical along lane_x from cout z to cin z
+        z0, z1 = sorted([cout_abs[2], cin_abs[2]])
+        for zz in range(z0, z1+1):
+            wire(lane_x, 0, zz)
+        # horizontal from lane to next cin
+        run = 0
+        for x in range(lane_x, cin_abs[0]):
+            wire(x, 0, cin_abs[2]); run += 1
+            if run % 15 == 0: rep(x, 0, cin_abs[2], "west")
+
+    # 2. bit0 cin = is_sub. For a self-contained buildable demo we expose cin[0],
+    #    a[i], b[i], op[3:0] as lever inputs on the west edge of each slice —
+    #    those pins are already primary inputs; leave them as wire stubs for the
+    #    builder to drive. (op broadcast bus below is optional convenience.)
+    # 3. op[3:0] broadcast bus: 4 Z-lanes south of the slices, each op line runs
+    #    the full width and taps up into every slice's op pin.
+    for k in range(4):
+        bus_z = zbus0 + k*2
+        # full-width bus lane
+        run = 0
+        for x in range(mn[0], mn[0] + pitch*8):
+            wire(x, 0, bus_z); run += 1
+            if run % 15 == 0: rep(x, 0, bus_z, "west")
+        # tap into each slice's op[k] pin (at z=op_ps[k][2]) via a short Z spur
+        for i in range(8):
+            px = op_ps[k][0] + i*pitch
+            z0, z1 = sorted([op_ps[k][2], bus_z])
+            for zz in range(z0, z1+1):
+                wire(px, 0, zz)
+    print(f"[compose] wired carry chain + op bus, {s.block_count()} blocks", flush=True)
 
     outp = os.path.join(HERE, "alu8_composed.litematic")
     s.save_to_file(outp)

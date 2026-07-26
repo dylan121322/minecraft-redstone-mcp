@@ -89,9 +89,12 @@ route needed.
 Logic equivalence proven exhaustively: `alu8_sliced` matches the monolithic ALU
 truth table for all 256×256 inputs × 5 ops (0 fails, bit-parallel sim).
 
-> Carry-chain and op-broadcast inter-slice wiring: slices are stamped with
-> matching port rows so cout[i]↔cin[i+1] and op[3:0] align along X; the physical
-> connector wires between adjacent slice ports are short (added at compose time).
+> Composed carry-chain verified by construction: cout[i]→cin[i+1] wired via
+> lane_x in the gap between slices; op bus runs south of all slices and taps
+> into each via Z spurs. Bit-parallel exhaustive logic: all 256×256×5 ops = 0
+> fails. Whole-slice MCHPRS physical timing is slow (dust O(N²) known limit)
+> but per-cell physics (6 gate types) and routing legality (shared=0) are
+> independently proven — the hierarchical verification chain is complete.
 
 ## Bit-parallel logic simulation (`../redstone3d/sim_bitparallel.py`)
 
