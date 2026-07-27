@@ -503,7 +503,7 @@ class GpuRouter:
         for n in local:
             z = list(zone_of(n))[0]
             local_zones.setdefault(z, []).append(n)
-        CAP = 3
+        CAP = 1
         zone_local_color = {}
         max_local = 0
         for z, group in sorted(local_zones.items()):
@@ -529,6 +529,12 @@ class GpuRouter:
         placed_occ = None
         INF = float('inf')
 
+        # Global via-shaft reservation: EVERY net's pin column is a vertical via
+        # shaft. A trunk must never sit on a foreign net's shaft (else that net's
+        # via, climbing through this trunk layer, shorts the trunk). Reserve all
+        # pin columns + their 8-neighbour ring on the trunk layer; open only this
+        # group's own shafts. This removes the via穿层 shorts structurally.
+        all_shaft = set(self.pin_cells.keys())
         def build_cost(tl, x_lo, x_hi, pin_set):
             c = torch.full((self.L, self.X, self.Z), INF, device=self.dev)
             c[tl] = 1.0
@@ -536,9 +542,27 @@ class GpuRouter:
                 glo, ghi = (x_lo - self.x0, min(x_hi - self.x0, self.X))
                 c[tl, :max(0, glo), :] = INF
                 c[tl, ghi:, :] = INF
+            # block foreign via shafts on the trunk layer. Only the shaft CELL
+            # itself (not an 8-ring): pins are already spaced >=2 apart (placer),
+            # so a trunk passing beside a foreign shaft doesn't short it, and the
+            # ring was over-blocking — it walled off legit trunk corridors and
+            # left dense-PI-region nets (n7) unroutable.
+            foreign_shaft = all_shaft - set(pin_set)
+            for sgx, sgz in foreign_shaft:
+                for dx in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        qx, qz = sgx + dx, sgz + dz
+                        if 0 <= qx < self.X and 0 <= qz < self.Z:
+                            c[tl, qx, qz] = INF
             for gx, gz in pin_set:
                 c[0:tl + 1, gx, gz] = 1.0
             if placed_occ is not None:
+                # Keep-out foreign cells + their 8-neighbour shell on EVERY layer.
+                # A via segment (pin column, layers 0..tl) can be adjacent to a
+                # foreign net's trunk on an intermediate layer — restricting the
+                # keep-out to only `tl` left those via-vs-trunk shorts (the 88).
+                # Apply the shell keep-out across all layers so both trunks AND
+                # via columns steer clear of foreign cells.
                 f = placed_occ > 0
                 k = f.clone()
                 for dx, dz in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
@@ -552,7 +576,11 @@ class GpuRouter:
                     elif dz == -1:
                         s[:, :, -1] = False
                     k |= s
-                c[tl][k[tl]] = INF
+                # protect trunk layer fully; protect via columns on lower layers
+                # but DON'T block the pin cells themselves (they must stay open)
+                for pgx, pgz in pin_set:
+                    k[:, pgx, pgz] = False
+                c[k] = INF
             return c
 
         def route_group(group, cost):
@@ -560,6 +588,7 @@ class GpuRouter:
             hist = torch.zeros((self.L, self.X, self.Z), device=self.dev)
             best_gr = None
             bestbad = 1 << 30
+            best_score = (1 << 30, 1 << 30)
             for it in range(layer_iters):
                 gr = {i: [] for i in range(len(group))}
                 seeds = {gi[n]: [(0,) + self._g(self.pl.net_sources[n][0], self.pl.net_sources[n][2])] for n in group}
@@ -589,19 +618,45 @@ class GpuRouter:
                     for l, x, z in cells:
                         gocc[l, x, z] = i + 1
                 nb = int(self._short_cells(gocc).sum().item())
-                if nb < bestbad:
+                # count nets that failed to reach all sinks this round: a net is
+                # connected iff it has >=1 cell adjacent to each of its sink pins.
+                nunconn = 0
+                for i, group_n in enumerate([group[j] for j in range(len(group))]):
+                    S = set(tuple(c) for c in gr[i])
+                    near = lambda g: any((1, g[0]+dx, g[1]+dz) in S
+                                         for dx, dz in [(0,0),(1,0),(-1,0),(0,1),(0,-1)])
+                    if not gr[i] or not all(near(self._g(k[0], k[2]))
+                                            for k in self.pl.net_sinks[group_n]):
+                        nunconn += 1
+                # score: connectivity FIRST, then shorts (never pick a
+                # low-short round that dropped a net — that was the empty-net bug)
+                score = (nunconn, nb)
+                if best_gr is None or score < best_score:
+                    best_score = score
                     bestbad = nb
                     best_gr = {i: list(v) for i, v in gr.items()}
-                if nb == 0:
+                if nunconn == 0 and nb == 0:
                     break
                 hist += self._short_cells(gocc).float() * 4.0
             return (best_gr, bestbad)
+        # Assign each (zone, local_color) group its OWN unique trunk layer (no
+        # layer-number reuse across zones). This removes cross-zone same-layer
+        # adjacency at zone boundaries: each trunk layer holds exactly one group,
+        # so intra-layer shorts are structural-0 and cross-layer is isolated
+        # (2-Y gap). via穿层 keep-out (build_cost) handles the vertical columns.
+        next_tl = 1
         for z, zone_nets in sorted(local_zones.items()):
             by_lc = {}
             for n in zone_nets:
                 _, lc = zone_local_color[n]
                 by_lc.setdefault(lc, []).append(n)
             for lc, group in sorted(by_lc.items()):
+                tl = next_tl
+                next_tl += 1
+                if tl >= self.L:
+                    if verbose:
+                        print(f'  zone={z} lc={lc}: NO LAYER (L={self.L})', flush=True)
+                    continue
                 pin_set = set()
                 for n in group:
                     pin_set.add(self._g(self.pl.net_sources[n][0], self.pl.net_sources[n][2]))
@@ -609,18 +664,20 @@ class GpuRouter:
                         pin_set.add(self._g(k[0], k[2]))
                 x_lo = X0 + z * zone_width
                 x_hi = x_lo + zone_width
-                cost = build_cost(lc, x_lo, x_hi, pin_set)
+                cost = build_cost(tl, x_lo, x_hi, pin_set)
                 gr, bestbad = route_group(group, cost)
                 if verbose:
-                    print(f'  zone={z} lc={lc}: {len(group)} nets, shorts={bestbad}', flush=True)
+                    ne = sum(1 for i in gr if gr[i])
+                    print(f'  zone={z} lc={lc} tl={tl}: {len(group)} nets {ne} nonempty, shorts={bestbad}', flush=True)
                 for i, cells in gr.items():
                     routes_final[net_idx[group[i]]] = cells
                 if placed_occ is None:
                     placed_occ = torch.zeros((self.L, self.X, self.Z), dtype=torch.int32, device=self.dev)
                 for i, cells in gr.items():
                     gidx = net_idx[group[i]] + 1
-                    for l, x, z in cells:
-                        placed_occ[l, x, z] = gidx
+                    for cl, cx, cz in cells:
+                        placed_occ[cl, cx, cz] = gidx
+        max_local = next_tl - 1
         for gi, n in enumerate(globl):
             tl = max_local + gi + 1
             if tl >= self.L:
@@ -669,22 +726,19 @@ if __name__ == '__main__':
     from placer import place
     nls = json.load(open(os.path.join(base, '..', 'riscv_synth', 'netlists.json')))
     mod = sys.argv[1] if len(sys.argv) > 1 else 'alu1'
-    L = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+    L = int(sys.argv[2]) if len(sys.argv) > 2 else 12
     cg = int(sys.argv[3]) if len(sys.argv) > 3 else 16
     rg = int(sys.argv[4]) if len(sys.argv) > 4 else 10
+    W = int(sys.argv[5]) if len(sys.argv) > 5 else 80
     pl = place(nls[mod], col_gap=cg, row_gap=rg)
     r = GpuRouter(pl, nlayers=L, layer_y=tuple(range(0, 2 * L, 2)))
-    print(f'[{mod}] grid L={r.L} X={r.X} Z={r.Z} device={r.dev} nets={len(pl.net_sinks)}')
+    print(f'[{mod}] grid L={r.L} X={r.X} Z={r.Z} device={r.dev} zoneW={W}')
     t = time.time()
-    color, ncolors, net_idx = r.route_layered(iters_per=20, verbose=True)
-    if isinstance(color, dict):
-        need = ncolors + 1
-        if r.L < need:
-            r = GpuRouter(pl, nlayers=need, layer_y=tuple(range(0, 2 * need, 2)))
-            color, ncolors, net_idx = r.route_layered(iters_per=20, verbose=False)
-        routes, nbad, net_idx = r.route_layer_confined(color, ncolors, net_idx, verbose=True)
-    else:
-        routes, nbad = (color, ncolors)
+    routes, nbad, net_idx = r.route_partitioned(zone_width=W, verbose=True)
     torch.cuda.synchronize() if r.dev.type == 'cuda' else None
     nwires = sum((len(v) for v in routes.values()))
-    print(f'[{mod}] LAYERED DONE shorts={nbad} wires={nwires} layers={ncolors} time={time.time() - t:.1f}s')
+    unr = getattr(r, 'unrouted', [])
+    ok = nbad == 0 and (not unr)
+    print(f"[{mod}] PARTITIONED shorts={nbad} UNROUTED={len(unr)} wires={nwires} time={time.time()-t:.1f}s  => {'LEGAL+CONNECTED' if ok else 'NOT USABLE'}")
+    if unr:
+        print(f'  unrouted e.g. {unr[:6]}')
