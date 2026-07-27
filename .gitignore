@@ -50,3 +50,10 @@ __pycache__/
 # Windows compute job logs
 *_batch.log
 *_log.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# Router generated artifacts (regenerable)
+*.blocks.json
