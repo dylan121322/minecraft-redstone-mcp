@@ -422,6 +422,22 @@ routes 直接给出可 emit 的 rise/drop 段。即 **route 和 emit 统一用 v
 - **待完成**: route+emit 协同用 via_gadget 几何 (via 横向足迹纳入 route 占用) → 整芯片真值表 → 游戏内建造
 所有部件验证齐备, 缺 route/emit 的 via 几何统一 (让抽象 via = 可建造 rise/drop)。
 
+### ★ 关键矛盾: 横向 via 与 CAP=1 深度不兼容 (2026-07-27)
+量化: CAP=1 → alu1 trunk 层 1..29 (每网独占层)。最深 29 层 = y58, 横向 rise 需
+**60 格 x** (每级+1x)。col_gap=16 通道远不够 → rise 会横穿撞邻列。
+根源: "层高 × 层数" 太大。CAP=1 无层内短路但 via 极深; 横向 rise 放大了深度代价。
+
+### 下一步设计决策 (需重新权衡分层)
+让 via 浅 = 减层数。选项:
+1. **CAP 提高 (6-8)**: 层数 29→~4-5, rise 横向 ~10 格 (col_gap 够), 但层内网多,
+   需 negotiated 消层内短路 (CAP=3 实测每层 0 短路, CAP 更大待验)。
+2. **trunk 层复用 + 横向 via**: 回到 opus-5 CAP=3 空间分区(不同zone同层号),
+   via 用横向 rise/drop(不穿别层, 解决之前的 via 穿层短路)。via 浅(≤3层→横向≤8格)。
+3. **竖直 via + 加大 col_gap**: 保 CAP=1 但 col_gap 加到 60+(布局巨大)。
+推荐 (1) 或 (2): via 浅是关键。CAP=3 层号复用 + 横向 rise/drop 最平衡。
+下一步: route_partitioned 改 CAP=3 层号复用(不唯一层) + via 建模成横向 rise/drop
+(足迹纳入占用), 验证层内+跨zone 0短路, 再 emit 整芯片。
+
 ### 分层验证链现状 (3/4 层已证)
 - 逻辑 netlist 40/40 ✓ | cell 物理 4/4 ✓ | 布线 0短路+全连通 ✓
 - 整芯片物理 MCHPRS: ✗ (via↔pin 交接待解)
