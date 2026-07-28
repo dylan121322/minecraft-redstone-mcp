@@ -98,9 +98,39 @@ def drop_cells(x, z, y_top, y0):
     return p, cx
 
 
+def rep_e():
+    return "minecraft:repeater[facing=east,delay=1]"
+
+
+def drop_cells_west(x, z, y_top, y0):
+    """-x staircase descent from (x,y_top) to (x_out,y0), x_out < x. Mirror of
+    drop_cells. Used for SINK vias so the descent lands WEST of the sink pin
+    (kwx), never overwriting the input repeater at kwx. Verified: test_drop_west.
+    Refresh repeaters face EAST (drive west, = travel direction)."""
+    p = []
+    cx = x; cy = y_top
+    since = 0
+    while cy > y0:
+        if since >= 10 and cy > y0 + 1:
+            cx -= 1
+            p.append((cx, cy-1, z, S)); p.append((cx, cy, z, rep_e()))
+            cx -= 1
+            p.append((cx, cy-1, z, S)); p.append((cx, cy, z, W))
+            since = 0
+        cx -= 1
+        cy -= 1
+        if cy > y0:
+            p.append((cx, cy-1, z, S))
+        p.append((cx, cy, z, W))
+        since += 1
+    return p, cx
+
+
 if __name__ == "__main__":
     # self-check footprint sizes
     pr, xo = rise_cells(0, 0, 0, 10)
     print(f"rise y0->y10: x_out={xo} (width {xo-0}), {len(pr)} blocks")
     pd, xo2 = drop_cells(0, 0, 10, 0)
     print(f"drop y10->y0: x_out={xo2} (width {xo2-0}), {len(pd)} blocks")
+    pw, xo3 = drop_cells_west(0, 0, 10, 0)
+    print(f"drop_west y10->y0: x_out={xo3} (width {0-xo3}), {len(pw)} blocks")

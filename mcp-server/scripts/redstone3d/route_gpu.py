@@ -493,8 +493,18 @@ class GpuRouter:
         path.reverse()
         return path
 
-    def route_partitioned(self, zone_width=80, base_iters=12, layer_iters=20, verbose=True):
-        """Spatial-zone layered routing. See ROUTER_JOURNAL §IX."""
+    def route_partitioned(self, zone_width=80, base_iters=12, layer_iters=20,
+                          cap=1, share_layers=False, even_layers_only=True,
+                          verbose=True):
+        """Spatial-zone layered routing. See ROUTER_JOURNAL §IX.
+
+        cap: max nets per local color (layer). cap=1 => one net per layer (deep
+             vias, structural 0-short). Higher cap packs the sparse conflict
+             graph into FEWER layers => SHALLOWER sink-down vias, at the cost of
+             relying on route_group's negotiated keep-out to keep same-layer
+             nets apart. share_layers=True additionally reuses trunk-layer
+             numbers across zones (x-disjoint zones can't short on a shared
+             layer) to compress depth further."""
         nets = list(self.pl.net_sinks)
         mn, mx = self.pl.bounds
         X0 = mn[0]
@@ -513,7 +523,7 @@ class GpuRouter:
         for n in local:
             z = list(zone_of(n))[0]
             local_zones.setdefault(z, []).append(n)
-        CAP = 1
+        CAP = cap
         zone_local_color = {}
         max_local = 0
         for z, group in sorted(local_zones.items()):
@@ -654,7 +664,13 @@ class GpuRouter:
         # adjacency at zone boundaries: each trunk layer holds exactly one group,
         # so intra-layer shorts are structural-0 and cross-layer is isolated
         # (2-Y gap). via穿层 keep-out (build_cost) handles the vertical columns.
-        next_tl = 1
+        # even_layers_only: assign trunk layers 2,4,6,... so a source RISE (torch
+        # tower, n=layer torches) always uses an EVEN torch count => non-inverting
+        # with NO parity correction. Odd layers would invert the signal and need
+        # a fragile wall-torch fixup (verified unreliable). Costs 2x via depth,
+        # irrelevant for MCHPRS/logic; depth is optimized later (planar routing).
+        step = 2 if even_layers_only else 1
+        next_tl = step
         for z, zone_nets in sorted(local_zones.items()):
             by_lc = {}
             for n in zone_nets:
@@ -662,7 +678,7 @@ class GpuRouter:
                 by_lc.setdefault(lc, []).append(n)
             for lc, group in sorted(by_lc.items()):
                 tl = next_tl
-                next_tl += 1
+                next_tl += step
                 if tl >= self.L:
                     if verbose:
                         print(f'  zone={z} lc={lc}: NO LAYER (L={self.L})', flush=True)
@@ -687,9 +703,9 @@ class GpuRouter:
                     gidx = net_idx[group[i]] + 1
                     for cl, cx, cz in cells:
                         placed_occ[cl, cx, cz] = gidx
-        max_local = next_tl - 1
+        max_local = next_tl - step
         for gi, n in enumerate(globl):
-            tl = max_local + gi + 1
+            tl = max_local + (gi + 1) * step
             if tl >= self.L:
                 continue
             pin_set = set()

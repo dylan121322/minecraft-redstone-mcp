@@ -25,6 +25,32 @@ def rep(f): return f"minecraft:repeater[facing={f},delay=1]"
 
 FLOW_FACING = {(1, 0): "west", (-1, 0): "east", (0, 1): "north", (0, -1): "south"}
 MAX_RUN = 13
+TORCH = "minecraft:redstone_torch"
+
+
+def trunk_plane_y(base_y, layer):
+    """World-Y of the trunk DUST plane for a given (even) trunk layer. A source
+    torch tower of n=layer torches puts its top dust at base_y+2*layer+1, so the
+    whole net's trunk dust lives on that ODD plane (supports at even Y below).
+    Verified in test_rise_aligned.py (layers 2..20 all non-inverting)."""
+    return base_y + 2 * layer + 1
+
+
+def _emit_rise(B, wx, wz, base_y, layer):
+    """Non-inverting 1x1 source RISE to trunk_plane_y(base_y,layer). layer MUST
+    be even (router even_layers_only) so torch count is even => non-inverting.
+    Caller drives a repeater feed from the WEST at (wx-1, base_y). Returns the
+    top dust Y (== trunk_plane_y). Verified: test_rise_aligned.py."""
+    B(wx - 1, base_y, wz, rep(FLOW_FACING[(1, 0)]))   # repeater faces west, drives east
+    B(wx, base_y, wz, S)                              # block0
+    y = base_y
+    for _ in range(layer):
+        B(wx, y + 1, wz, TORCH)                       # standing torch (inverts)
+        B(wx, y + 2, wz, S)                           # block on top
+        y += 2
+    top_y = y + 1
+    B(wx, top_y, wz, W)                               # trunk dust on final block
+    return top_y
 
 
 class Recorder:
@@ -65,44 +91,72 @@ def build_full(data, netlist, placement):
     for name, pc in placement.placed.items():
         pc.cell.emit(rec, *pc.origin)
 
-    # 3. routing per net: trunk (flat, at the net's trunk layer) + horizontal
-    #    rise/drop vias (via_gadget, verified non-inverting w/ repeater refresh).
+    # 3. routing per net. Signal flow: source pin (y0, driven by a gate output)
+    #    -> RISE (1x1 vertical torch tower, verified non-inverting/no-decay) to
+    #    the net's trunk layer -> flat trunk run -> DROP (+x staircase, verified)
+    #    down to each sink pin (y0, feeds a gate input).
+    #    Source vs sink is taken from the PLACEMENT (net_sources / net_sinks),
+    #    not guessed from cell layers, so direction is always correct.
     from collections import Counter
-    from via_gadget import rise_cells, drop_cells
+    from via_gadget import drop_cells_west
     for net, cells in data["routes"].items():
-        # trunk layer = the layer holding most of this net's cells
         layer_count = Counter(l for (l, gx, gz) in cells)
         trunk_layer = layer_count.most_common(1)[0][0]
-        trunk_wy = layer_y[trunk_layer] + base_y
-        # emit trunk-layer cells flat (dust + support)
+        # trunk DUST plane at odd Y = base_y + 2*trunk_layer + 1 (see
+        # trunk_plane_y / test_rise_aligned). Supports one below.
+        trunk_wy = trunk_plane_y(base_y, trunk_layer)
+
+        # 3a. flat trunk run: lay every trunk-layer cell as dust on the odd
+        #     plane, support below. This is the abstract router's connected path.
+        trunk_cols = set()
         for (l, gx, gz) in cells:
             if l != trunk_layer:
                 continue
-            wx, wz = gx+x0, gz+z0
+            wx, wz = gx + x0, gz + z0
+            trunk_cols.add((wx, wz))
             B(wx, trunk_wy, wz, W)
-            if trunk_wy > base_y:
-                B(wx, trunk_wy-1, wz, S)
-        # via columns: pin (x,z) that need to connect y0<->trunk. Identify from
-        # cells that are NOT on the trunk layer (the abstract via segments) —
-        # take their (gx,gz) as the pin columns needing a rise/drop.
-        via_cols = set((gx, gz) for (l, gx, gz) in cells if l != trunk_layer)
-        for (gx, gz) in via_cols:
-            wx, wz = gx+x0, gz+z0
-            # emit a horizontal rise from y0 at this column up to trunk_wy, then
-            # connect its top to the trunk cell here. (rise spreads in +x; the
-            # trunk dust at (wx,trunk_wy,wz) is the join point.)
-            pr, xo = rise_cells(wx, wz, base_y, trunk_wy)
-            for (rx, ry, rz, blk) in pr:
-                B(rx, ry, rz, blk)
-            # ensure the rise top dust connects to the trunk dust at (wx,...):
-            # rise ends at (xo, trunk_wy); put trunk dust bridging xo..wx if gap
-            lo, hi = min(xo, wx), max(xo, wx)
-            for bx in range(lo, hi+1):
-                B(bx, trunk_wy, wz, W)
-                if trunk_wy > base_y:
-                    B(bx, trunk_wy-1, wz, S)
-            # y0 dust at the pin column feeds the gate pin
-            B(wx, base_y, wz, W)
+            B(wx, trunk_wy - 1, wz, S)
+
+        # 3b. SOURCE rise: even-layer torch tower from the driver pin (y0) up to
+        #     the trunk plane. Top dust lands at (swx, trunk_wy, swz) and joins
+        #     the trunk run there (the abstract via guarantees this column is a
+        #     trunk cell). Feed is a repeater the tower places to the pin's west.
+        src = placement.net_sources.get(net)
+        if src is not None and trunk_layer > 0:
+            swx, swz = src[0], src[2]
+            ty = _emit_rise(B, swx, swz, base_y, trunk_layer)
+            # ensure join: trunk dust at the source column
+            B(swx, ty, swz, W)
+            if (swx, swz) not in trunk_cols:
+                B(swx, ty - 1, swz, S)
+        elif src is not None:
+            B(src[0], base_y, src[2], W)
+
+        # 3c. SINK drops: +x staircase from trunk_wy down to each sink pin y0.
+        #     drop_cells starts at (x, trunk_wy) trunk dust and lands y0 at x_out;
+        #     we want the landing to be the pin's WEST feed at (px-1, pz). So the
+        #     drop must START far enough WEST that it lands at px-1. But the trunk
+        #     dust for this net sits at the sink's own column (kgx,kgz) on the
+        #     trunk layer (the abstract via cell). Emit the staircase from there.
+        for k in placement.net_sinks.get(net, []):
+            kwx, kwz = k[0], k[2]
+            if trunk_layer > 0:
+                # ensure a trunk dust exists at the sink column to launch the drop
+                B(kwx, trunk_wy, kwz, W)
+                if (kwx, kwz) not in trunk_cols:
+                    B(kwx, trunk_wy - 1, kwz, S)
+                # -x staircase: descend WEST of the sink column so the landing is
+                # WEST of the input repeater at kwx (never overwrites the pin).
+                pr, xo = drop_cells_west(kwx, kwz, trunk_wy, base_y)
+                for (dx_, dy_, dz_, blk) in pr:
+                    B(dx_, dy_, dz_, blk)
+                # landing at (xo, base_y) is west of kwx. Bridge east to the pin's
+                # west feed at (kwx-1) — all cells stay < kwx, so the repeater at
+                # (kwx) reads a driven west neighbour and is never covered.
+                for bx in range(xo, kwx):        # xo .. kwx-1 inclusive
+                    B(bx, base_y, kwz, W)
+            else:
+                B(kwx - 1, base_y, kwz, W)
 
     # 4. PI injectors + PO probes
     pi_inject = {}

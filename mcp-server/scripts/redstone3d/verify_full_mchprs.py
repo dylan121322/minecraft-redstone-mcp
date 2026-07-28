@@ -11,7 +11,8 @@ import nucleation as nuc
 RB = "minecraft:redstone_block"
 
 def main():
-    d = json.load(open(r"E:\project\alu1_full.json"))
+    fj = os.environ.get("FULL_JSON", r"E:\project\alu1_full.json")
+    d = json.load(open(fj))
     blocks = d["blocks"]; pi = d["pi_inject"]; po = d["po_read"]
     nls = json.load(open(os.path.join(base, "..", "riscv_synth", "netlists.json")))
     nl = nls["alu1"]
