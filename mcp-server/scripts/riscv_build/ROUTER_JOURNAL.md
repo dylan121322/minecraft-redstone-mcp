@@ -300,6 +300,40 @@ repeater 47(门内)。
 需要: 专门验证 via 塔↔cell pin 交接原语 (塔顶/底如何接 dust 和 repeater),
 确定极性(偶数 torch 非反相)和几何对齐,再重新 emit。
 
+### ★ via↔cell-pin 交接原语已验证 (test_via_pin.py, 2026-07-27)
+完整链 MCHPRS 2/2: 源dust → 上升via → trunk → 下降via → 喂NOT引脚 → NOT正确反相
+(drive0→out15, drive1→out0)。确定的原语:
+- **上升 via (非反相)**: dust → repeater[facing=west] → block+dust(y1) → block+dust(y2).
+  实测 drive1: y1=15 y2=14 y3=13 一路上升; drive0 全0. 用 repeater-riser,NOT standing-torch塔。
+- **下降 via (非反相)**: dust(y2) → block@y0+dust(y1) → dust(y0). +x staircase, see-below 规则。
+- **接引脚**: y0 dust 从西侧喂 cell 的 repeater[facing=west] 输入引脚。
+- 关键: 用 repeater-riser + staircase (都非反相、强供电、可靠),放弃 standing-torch 塔
+  (每torch反相+难对接,是之前 stuck-high 的根因)。
+
+### ⚠️ 几何矛盾待解: 竖直 via vs 横向 riser
+GPU route 的 via 是**竖直**(同 gx,gz 跨多层),但验证的 repeater-riser/staircase 是
+**横向展开**(+x 走 3-4 格)。route 的 cells 没预留横向空间。两个方案:
+(a) 改 route: via 列预留 +x 横向空间给 riser 展开 (每 via 占 ~4格 x)
+(b) emit 时把竖直 via 就地展开成横向 riser (需相邻空位, 可能撞别的)
+方案(a)更干净: 在 route_partitioned 里 via 不是单列而是一个小 riser 占位。
+
+### ★ 竖直 via 塔也验证可行 (T3, 2026-07-27)
+纯竖直 standing-torch 塔 (1×1 占地) 非反相传输已验证:
+drive0 → torch0(y1)=1 torch1(y3)=0; drive1 → torch0=0 torch1=1。
+**偶数 torch = 非反相**, 塔顶 = drive 值。塔底经 repeater 供电。
+=> 竖直 via 可行,route 的竖直 via 不必改成横向,消除几何矛盾。
+
+两个交接原语都验证 OK:
+- T2 横向 riser 完整链 2/2 (repeater-riser + staircase, 横向占3-4格)
+- T3 竖直 standing-torch 塔非反相 (1×1, 偶数torch)
+
+### 交接原语已攻克, 剩余=emit 集成细节
+emit_full 之前 stuck-high 的根因: standing-torch 塔的(a)奇偶极性没控制(需偶数torch),
+(b)塔顶接 trunk dust 的方式,(c)塔底接 cell 引脚(repeater)的对接。
+现在原语明确 (T3): 竖直塔用偶数 torch 保非反相, 塔顶 block 上放 dust 接 trunk,
+塔底 block 由下一级引脚方向供电。下一步: 按 T3 重写 emit_full 的 via 生成
+(竖直塔 + 偶数torch + 塔顶/底对接), 保 route 的竖直 via 不变, 重跑整芯片 MCHPRS。
+
 ### 分层验证链现状 (3/4 层已证)
 - 逻辑 netlist 40/40 ✓ | cell 物理 4/4 ✓ | 布线 0短路+全连通 ✓
 - 整芯片物理 MCHPRS: ✗ (via↔pin 交接待解)
