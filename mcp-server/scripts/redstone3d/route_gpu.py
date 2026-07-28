@@ -29,9 +29,19 @@ _H = [(1, 0), (-1, 0), (0, 1), (0, -1)]
 
 class GpuRouter:
 
-    def __init__(self, placement, device='cuda', nlayers=2, layer_y=(0, 2), margin=6):
+    @staticmethod
+    def _auto_device():
+        # Win RTX 5080 -> cuda; Mac -> mps; else cpu. Keeps the toolchain
+        # runnable on either machine without code edits.
+        if torch.cuda.is_available():
+            return 'cuda'
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return 'mps'
+        return 'cpu'
+
+    def __init__(self, placement, device=None, nlayers=2, layer_y=(0, 2), margin=6):
         self.pl = placement
-        self.dev = torch.device(device)
+        self.dev = torch.device(device or self._auto_device())
         self.L = nlayers
         self.layer_y = layer_y
         mn, mx = placement.bounds
