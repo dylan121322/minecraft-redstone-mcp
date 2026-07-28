@@ -334,6 +334,42 @@ emit_full 之前 stuck-high 的根因: standing-torch 塔的(a)奇偶极性没�
 塔底 block 由下一级引脚方向供电。下一步: 按 T3 重写 emit_full 的 via 生成
 (竖直塔 + 偶数torch + 塔顶/底对接), 保 route 的竖直 via 不变, 重跑整芯片 MCHPRS。
 
+### ★★ 核心问题精确定位 (2026-07-27): standing-torch 塔不适合做 via
+补偶数火把后整芯片仍 0/4 stuck-high。检查发现根因:
+1. **standing-torch 默认亮**: torch 无输入信号时默认 lit=1(输出1)。整芯片大量 via 塔
+   torch 在信号未到达时全亮 → 输出恒 1。这就是 stuck-high 的真相。
+2. **注入/极性纠缠**: PI 注入 redstone_block 供电塔底 block → 塔底 torch 灭 → 反相;
+   偶奇难控; 塔底与 PI 注入位置对接靠"block 强供电"语义复杂。
+3. **对比**: T2 的 repeater-riser 强供电、默认0、非反相、可靠 —— 但它是**横向**的
+   (占 3-4 格 x), 而 route 的 via 是**竖直单列**, 没预留横向空间。
+
+=> 核心矛盾: 可靠的 via 原语(repeater-riser)需要横向空间, route 的竖直 via 没给。
+standing-torch 竖直塔虽 1×1 但默认亮+极性问题, 不可靠。
+
+### 解法 (方案 a, 布线器层面): route 给 via 预留 riser 横向槽
+route_partitioned 的 via 不应是单列 (gx,gz), 而是预留一个小的横向 riser 占位
+(gx..gx+3 在 y0→trunk 之间), emit 时填 repeater-riser。这是布线器改动:
+- 源 via: 门输出 dust → +x 方向 repeater-riser 上到 trunk 层
+- 汇 via: trunk → +x staircase 下降到 sink 引脚
+- riser/staircase 占的横向格要纳入 route 的占用+短路检测
+工作量: route_partitioned 的 via 建模改横向 + emit 对应。是下一大步。
+现状: 布线抽象 0短路+全连通 ✓, 交接原语 ✓, 但 via 的物理 emit 需要 route 预留横向空间。
+
+### via_gadget.py: 横向 repeater-riser via (rise/drop 各自 MCHPRS 验证 ✓)
+写了可复用的 via 几何生成器 (via_gadget.py):
+- rise_cells(x,z,y0,y_top): dust→repeater[west]→逐级 block+dust 上升, 每级+1x。
+  **单独测通**: y_top=2 顶=14, y_top=10 顶=6 (逐级衰减但传通 15→6)。
+- drop_cells(x,z,y_top,y0): +x staircase 下降。**单独测通**: 15→逐级降到 y0=12。
+足迹: rise 宽 = 2+(y_top-y0), drop 宽 = (y_top-y0)。这是 route 要预留的 +x 格数。
+
+### 待解: 完整链衔接 (rise+trunk+drop drive=1 断)
+rise✓ drop✓ 单独都通, 但 source→rise→trunk→drop→NOT引脚 完整链 drive=1 失败
+(NOT_out=15 应=0), drive=0 通。y_top=2 也失败 => 不是衰减, 是**衔接格**问题:
+rise 顶 dust 与 trunk run 起点、trunk 末与 drop 起点的对接有断点。需逐格探测衔接处
+电力定位。另外长链需 repeater 刷新 (y_top=10 顶已衰到6, 加 trunk+drop 会归0)。
+下一步: 修完整链衔接 (对齐 rise 顶/drop 起点 + 长 trunk 插 repeater), 再改 route
+预留 via 横向足迹 (rise 宽 2+Δy, drop 宽 Δy), 重新 route+emit+整芯片 MCHPRS。
+
 ### 分层验证链现状 (3/4 层已证)
 - 逻辑 netlist 40/40 ✓ | cell 物理 4/4 ✓ | 布线 0短路+全连通 ✓
 - 整芯片物理 MCHPRS: ✗ (via↔pin 交接待解)
