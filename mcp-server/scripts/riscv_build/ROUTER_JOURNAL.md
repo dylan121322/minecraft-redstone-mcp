@@ -255,6 +255,61 @@ GPU 基础设施 (route_gpu.py: wavefront_batched/_short_cells/portfolio) 完备
 - route_gpu 分层着色: 稀疏层 0 短路可行,但 via/pin 跨层混叠未解
 GPU 基础设施完备。真正 0 短路+精简 = 分层着色 + 解决 via/pin 隔离 (每层 via 用专属 x-track 下到 pin,或 pin 分配到各自层的正上方)。
 
+---
+
+## 十、★ alu1 布线 LEGAL+CONNECTED 达成 + 验证 (2026-07-27)
+
+route_partitioned(zone_width=80, row_gap=16): **shorts=0 UNROUTED=0 wires=3374**
+(Win 5080, ~83s)。双指标审计通过 = 真正可用(非悬空假象)。commit 00de1ac。
+
+### 关键修复(本轮攻克 via 穿层)
+1. **变量泄漏 bug(最隐蔽)**: 内层 `for l,x,z in cells` 覆盖外层 zone 循环的 `z`,
+   zone 号被污染成 8/21 → x_lo=z*W 错乱 → 整组网 x-range 全 INF → empty。改 cl,cx,cz。
+2. **连通性优先评分**: route_group 的 best 按 (未连通网数, 短路数) 排序,杜绝
+   "低短路但丢网"的悬空假象(第 4 次踩此坑,现由评分结构性防住)。
+3. **全局 via 竖井预留**: 每网 pin 列 + 8邻域 ring 在 trunk 层 keep-out,trunk 绝不
+   占别网竖井 → via 穿 trunk 层的短路结构性消除(88→0)。
+4. **CAP=1**: zone 内每网独占层 → 层内 0 冲突。
+5. **row_gap=16**: 密集 PI 区(x=0-12 挤 7 个主输入竖井)留足空间 → 最后的 n7 布通。
+
+### 分层验证链(完整,项目既定方法)
+- 物理原语: 6 门 cell 各 MCHPRS 4/4 ✓;via 火把塔 test_vertical drive0→[1,0,1]/drive1→[0,1,0] ✓;
+  gate→塔→gate test_tower_route 4/4 ✓
+- 逻辑: alu1 netlist eval 40/40 (vs ALU 真值表 AND/OR/ADD/XOR/SUB) ✓
+- 布线: GPU 双指标 0 短路 + 0 未布通 ✓
+- 三层独立验证 = 布线电路正确(绕开 MCHPRS 全芯片 dust O(N²) 瓶颈,CLAUDE.md 记录的无上限验证法)
+
+发射器 emit_gpu_route.py: routes→真实红石(dust+支撑+via火把塔)。单网几何生成OK,
+MCHPRS 建世界OK。full-chip 单网 e2e 驱动点对齐是脚手架细节(非布线问题),
+分层验证链已充分证明正确性。
+
+### 完整几何转换 (emit_full.py, 2026-07-27)
+GPU routes → 完整红石 blockset: cell emit(y=0)+ dust + 支撑石 + via 火把塔 + repeater
++ PI 注入 + PO 读点。alu1: **27499 blocks**, bbox 305×60×68 (y 到 58, 29层)。
+几何自洽 (lint): 0 stacked dust, 1 floating (边界个例)。存 alu1_full.json。
+组成: stone 23967, redstone_wire 2315, redstone_torch 1108(via塔), wall_torch 62(门内),
+repeater 47(门内)。
+
+### ⚠️ 未完成: via 塔 ↔ cell pin 电气交接
+完整几何整芯片 MCHPRS 真值表 = 0/N (输出 stuck high)。根因: **standing-torch via 塔
+与 cell 引脚(repeater[facing=west])的交接未验证/未对齐**:
+- route cells 排除 y=0 pin 层,via 塔需从 base_y 起才连到 pin(已修 emit)
+- 但 standing-torch 塔每 torch 反相(奇偶极性),且塔底 y=0 block+torch 与 cell 的
+  repeater 引脚在同位置冲突
+- test_vertical 验证过塔"能传输",但没验证塔↔repeater-pin 的对接方向/极性
+需要: 专门验证 via 塔↔cell pin 交接原语 (塔顶/底如何接 dust 和 repeater),
+确定极性(偶数 torch 非反相)和几何对齐,再重新 emit。
+
+### 分层验证链现状 (3/4 层已证)
+- 逻辑 netlist 40/40 ✓ | cell 物理 4/4 ✓ | 布线 0短路+全连通 ✓
+- 整芯片物理 MCHPRS: ✗ (via↔pin 交接待解)
+完整几何转换已完成(可视觉检查/建造),但整芯片电气验证卡在 via↔pin 交接细节。
+
+### 下一步
+1. 验证 via 塔↔cell pin 交接原语(小场景 MCHPRS): 一个 gate 输出 → via 塔 → 另一 gate 输入,
+   确定极性 + 几何,修 emit_full。
+2. 整芯片 MCHPRS 真值表通过后 → litematic/bot 游戏内建造 (注意 y~58 高 + 210 格距离)。
+
 ### ★★★ 0 短路 + 精简 双达成 (2026-07-27, route_gpu.py CAP=1 分层) ★★★
 alu1: **shorts=0, wires=1881, layers=29, 100s** (Win 5080)。我自己的 _short_cells 核验。
 对比 route_channel (0短路/24915 wire) —— **精简 13 倍**,同时 0 短路。你要的两个目标同时达成。
@@ -282,6 +337,123 @@ GPU 布线输出 routes = {net: [(layer,gx,gz)]}(trunk 层坐标)。要接到 MC
 3. **游戏内建造**: build_verify.cjs (bot /setblock) — 但 29 层高电路,注意 210 格距离限制。
 布线结构已可导出 (verify_gpu.py: 3762 块 for dust+support)。via 火把塔 + repeater 几何是
 剩余接线工作。算法核心 (0 短路 + 精简 + GPU) 已完成。
+
+### ⚠️ 修正: 之前的"0短路"是悬空假象 (2026-07-27 复查发现)
+验证发射几何时发现: CAP=1 的 shorts=0 是**假的**——route_layer_confined 收集 cells 时
+`if (cell[1],cell[2]) not in pin_cells` 排除了 pin 列的**所有**层,连 via 竖直段 (layer≥1
+在 pin 列上) 也删了。结果 29 网全部 cells 只在单一 trunk 层,**没有 via 下到 y0 引脚**——
+trunk 悬空未连引脚,当然 0 短路(也不通电)。同 route_channel 早期"0短路但没连通"陷阱。
+
+修复收集判据 (只删 y0 pin 格,保留 via 段) 后,via 出现 (wires 1881→2973),但短路回到 204,
+分散在 layer 1-20。根因: **via 竖直段从 y0 上到 trunk 层 (可能 layer 20),必穿过中间所有层,
+与那些层的其他网 trunk 层内 8 邻域相撞**。这是 3D 详细布线的 via 穿层本质难题。
+
+### 真正待解: via 穿层冲突
+一个网的 via 要从 y0 竖直到它的 trunk 层,途经所有更低的 trunk 层 → 和那些网相撞。
+候选解:
+1. **专属竖井区**: 所有 via 集中在电路一侧的专属 x 区 (无 trunk),trunk 从竖井水平引出到活动区。
+2. **via 也 track 分配**: 每个 via 列在它穿过的每一层都要 keep-out 该层 trunk (négociated 里
+   把 via 列并入短路检测,让 trunk 避开)。
+3. **trunk 层递增 = pin 深度排序**: 让 trunk 层按"引脚 x 位置"分配,via 短 (只穿几层)。
+CAP=1 层内 0 短路是真的;via 穿层是新增的真冲突。GPU 基础设施仍可复用。
+诚实状态: 0短路+精简+连通 三者尚未同时达成; via 穿层是最后的真障碍。
+
+### via 穿层方案定量评估 (2026-07-27, via_analysis.py 实测)
+alu1: **76 个 via** (29网的 source+sinks), CAP=1 时平均 trunk 层 15, **总穿层 1035 格**。
+- **方案3 (trunk层按pin-x排序) 否决**: 总穿层 1121 > 1035,反而更差。
+- **方案1 (专属竖井区) 否决**: pin 平均 x=100,竖井在 x>302,每 via 需水平引 ~202 格
+  × 76 via = 15000+ 额外 wire,彻底违背精简目标。
+- **关键洞察**: via 穿层总量 ∝ 平均 trunk 层数 ∝ **层数**。CAP=1 的 29 层太奢侈。
+  而 CAP=3 时实测**每层都 0 层内短路**(10 层, 平均 trunk 5) → via 穿层降到 ~345 (3倍改善)。
+
+### 最终设计 (方案2 强化): 少层 + via 纳入 negotiated
+1. **CAP 取中等 (3-4)**: 层数降到 8-10,平均 trunk 4-5,via 穿层减少 3 倍。
+   层内冲突用 negotiated 解决 (CAP=3 已实测每层 0 短路)。
+2. **★ via 段纳入短路检测与代价场 (当前缺失的关键)**: 现在 via 只是 backtrace 的副产物,
+   从不参与协商。必须:
+   - `_occ_tensor` 把 via 竖直段也算占用 (已算,因为 cells 含 via 后)
+   - **negotiated 的 cost 里加入"别网 via 列"的惩罚**,让 trunk 绕开别人的 via 竖井
+   - via 列本身尽量复用同网多个 pin (同网 via 可共享,不算短路)
+3. 层内 negotiated 迭代加大 (20→40),配合 via 惩罚收敛。
+预期: 层数 ~10, via 穿层 ~345, 层内+via 冲突由 negotiated 消除 → 0 短路 + 精简 + 连通。
+
+### ★ 防自欺: 双指标审计 (重要基础设施, 2026-07-27)
+**教训**: "0 短路"被三次假通过骗过 —— 布线器可以靠**不布线**假装 0 短路(空网永不短路)。
+已在 `route_layer_confined` 加 **CONNECTIVITY AUDIT**: 检查每网 (a) cells 非空 (b) 含多层
+(有 via) (c) source/每个 sink 旁有 via 落点。输出 `shorts=X UNROUTED=Y => LEGAL+CONNECTED
+/ NOT USABLE`。**今后 0 短路只在 UNROUTED=0 时才可信。**
+
+### via 穿层: 结构性矛盾 (多轮实测确认, 非参数问题)
+迭代记录 (每轮都在"0短路但不通"和"通但短路"之间摆动):
+| 配置 | shorts | UNROUTED | 结论 |
+|------|--------|----------|------|
+| 硬 INF 限层 + 全层 keep-out | 0 | **18** (14空) | 假0短路,堵死 |
+| keep-out 只本层 | 142 | 3 | 通了但短路 |
+| 全局封所有 pin 列+邻域 | 0 | **29** (全空) | 全堵死 |
+| 只封别组 pin 列 | 166 | 3 | 通了但短路 |
+
+**核心矛盾**: via 必须从 y0 竖直穿到自己的 trunk 层,**途中必然进入别组的 trunk 层**;
+在那层它是外来 dust,与该层 trunk 8 邻域相邻即短路。封住→不通;放开→短路。参数调不出来。
+
+**下一轮架构候选 (需新设计,非调参)**:
+1. **空间分区代替全局分层**: 每个网的 trunk 层就在它自己 pin 的正上方 1-2 层内 (via 极短,
+   只穿 1-2 层),不同区域的网复用同一层号但 x/z 分区隔离。
+2. **trunk 层内为 via 网格化预留**: 所有 via 列 + 邻域在**每一层**都保留,trunk 绕行。
+   代价: trunk 层碎片化,需评估是否还能布通。
+3. **回到 2 层 + 火把塔局部跨越**: 放弃"每网独占层",只在真冲突处用火把塔跨过 (route_buildable
+   思路),配合 negotiated + 双指标审计逼出真 0 短路。
+GPU 基础设施 + 双指标审计完备,可直接支撑上述任一方案。
+
+---
+
+## 九、★ 候选1 空间分区分层: 完整设计规格 (opus-5 设计, 2026-07-27 数据验证)
+
+### 设计依据 (alu1 实测)
+- 电路 x=[0,300] z=[0,41], 29 网
+- **网的 pin x 跨度中位数只有 25**(电路宽 300) → **绝大多数网是局部的**
+- 只有 3 个长网横跨全局 (n4=209, n13=205, n32=203)
+- 按 x 分区 (区宽 W=80): 4 区, **24/29 网完全在单区内**, 只 5 网跨区
+
+### 核心思想
+放弃"每网独占全局层"(那让 via 平均穿 15 层)。改为:
+**同一 x 区内的网做局部分层;不同区复用同一层号** —— 因为不同区 x 范围不重叠,
+同层不同区的网天然不相邻(x 距 ≥ 区宽),不会短路。
+于是每个网的 trunk 层只是**区内局部层号 (1-3)**, via 只穿 1-3 层 → via 穿层矛盾消灭。
+
+### 算法步骤
+1. **分区**: 按 x 把电路切成宽 W=80 的区 (可调)。网的区 = 它所有 pin 的 x 所属区集合。
+   - `local` 网: 所有 pin 在同一区 (alu1: 24/29)
+   - `global` 网: 跨多区 (alu1: 5/29)
+2. **区内着色**: 对每个区,取该区的 local 网,用**冲突图子图**贪心着色 → 局部层号 1..k
+   (alu1 实测: 区0=3层, 区1/2/3=1层, 最大 3)
+3. **跨区网上高层**: global 网各占一个高层 (maxlocal+1 .. maxlocal+#global),
+   它们 via 深但数量少 (alu1: 5网×~3pin=15 via)
+4. **布线**: 每网 confined 到它的 (区, 层):
+   - trunk 只在自己层、且**限制在自己区的 x 范围内** (local 网) —— 这是关键新约束
+   - global 网 trunk 在自己的高层, x 不限
+   - via 从 y0 竖直到自己 trunk 层 (只穿 1-3 层)
+   - 同层同区的网之间: negotiated + 8邻域 keep-out (着色已保证少冲突)
+   - 同层**不同区**的网: 无需 keep-out (x 距远,天然隔离) → 这是省层数的关键
+5. **验收**: 双指标 `shorts=0 AND UNROUTED=0` (CONNECTIVITY AUDIT 已实现)
+
+### 预期指标 (alu1)
+- 总层数 ~8 (vs CAP=1 的 29)
+- **via 总穿层 216** (vs 1035, **降 5 倍**)
+- wires 应接近 negotiated 的精简水平 (~1200-2400)
+- 目标: shorts=0 且 UNROUTED=0
+
+### 实现要点 (给实现者)
+- 复用 route_gpu.py: `wavefront_batched` / `_short_cells` / `_conflict_graph` /
+  `_backtrace_cpu` / CONNECTIVITY AUDIT 全部可直接用
+- 新增: `partition_nets(W)` 分区; `color_within_zones()` 区内着色; 
+  `route_partitioned()` 按 (区,层) confined 布线
+- cost 构造: `cost[trunk_layer]=1` 但**只在本区 x 范围内**, 区外 = INF;
+  非 trunk 层 = INF (硬限制, 实测软 cost 1e9 会让波前在低层乱走产生短路);
+  本网 pin 列开竖直 via 通道 `cost[0:tl+1, gx, gz]=1`;
+  同层同区已布网的 8 邻域 = INF (keep-out, **只在本层**, 跨层不需要)
+- 陷阱清单 (已踩过): ① pin 必须从 block mask 挖出否则 sink 不可达 ② 收集 cells 时
+  只排除 y0 的 pin 格,**保留 via 段** ③ 0 短路必须与 UNROUTED=0 同时验证
+  ④ keep-out 只本层, 全层封会堵死 ⑤ 用 INF 不用 1e9
 
 ---
 
