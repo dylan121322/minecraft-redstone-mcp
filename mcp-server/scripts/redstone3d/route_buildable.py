@@ -67,6 +67,11 @@ class BuildableRouter:
         self.owner0: Dict[XZ, str] = {}    # y=0 wire owner
         self.owner2: Dict[XZ, str] = {}    # y=2 bridge wire owner
         self.support1: Dict[XZ, str] = {}  # y=1 support/block owner
+        # negotiated-congestion history: per-cell penalty accumulated across
+        # rip-up rounds. A cell that hosted a short in a prior round gets a
+        # higher cost, so nets negotiate away from contested cells over rounds.
+        self.hist0: Dict[XZ, float] = {}   # y=0 plane history cost
+        self.histC: Dict[XZ, float] = {}   # cross (y4) plane history cost
 
     # ---------- helpers ----------
     def _foreign_plane(self, xz: XZ, net: str, owner: Dict[XZ, str]) -> bool:
@@ -94,40 +99,69 @@ class BuildableRouter:
     def _in_box(self, xz: XZ) -> bool:
         return self.bx[0] <= xz[0] <= self.bx[1] and self.bz[0] <= xz[1] <= self.bz[1]
 
-    # ---------- y=0 planar BFS ----------
-    def _plane_bfs(self, tree: Set[XZ], goal: XZ, net: str) -> Optional[List[XZ]]:
-        prev = {}; seen = set(tree); q = deque(tree)
-        while q:
-            cur = q.popleft()
+    # ---------- y=0 planar weighted shortest path (negotiated) ----------
+    def _plane_bfs(self, tree: Set[XZ], goal: XZ, net: str,
+                   soft: bool = False) -> Optional[List[XZ]]:
+        """Dijkstra on the y=0 plane. HARD blocks: out-of-box, cell body, pin
+        transit. SOFT costs (when soft=True, the negotiated mode): stepping onto
+        a foreign wire, or adjacent to a foreign wire/pin, costs a large penalty
+        plus the cell's accumulated history — allowed but discouraged, so nets
+        negotiate apart across rip-up rounds. soft=False reproduces the strict
+        one-shot behaviour (foreign adjacency forbidden)."""
+        import heapq
+        BASE = 1.0
+        ADJ_PEN = 40.0      # grazing a foreign wire/pin
+        OVER_PEN = 120.0    # sharing a foreign wire cell
+        dist = {c: 0.0 for c in tree}
+        prev: Dict[XZ, XZ] = {}
+        pq = [(0.0, c) for c in tree]
+        heapq.heapify(pq)
+        while pq:
+            d, cur = heapq.heappop(pq)
             if cur == goal:
                 path = [cur]
                 while path[-1] in prev:
                     path.append(prev[path[-1]])
                 path.reverse()
                 return path
+            if d > dist.get(cur, float("inf")):
+                continue
             for dx, dz in _H:
                 nx = (cur[0]+dx, cur[1]+dz)
-                if nx in seen:
-                    continue
                 if nx != goal:
                     if not self._in_box(nx):
                         continue
                     if nx in self.cell_xz:
                         continue
-                    o = self.owner0.get(nx)
-                    if o is not None and o != net:
-                        continue
                     if nx in self.pin_net:          # never transit through a pin
                         continue
-                    if self._foreign_plane(nx, net, self.owner0):
-                        continue
-                    if self._foreign_pin_adj(nx, net, goal):
-                        continue
-                seen.add(nx); prev[nx] = cur; q.append(nx)
+                    o = self.owner0.get(nx)
+                    adj_f = self._foreign_plane(nx, net, self.owner0) or \
+                            self._foreign_pin_adj(nx, net, goal)
+                    if not soft:
+                        if o is not None and o != net:
+                            continue
+                        if adj_f:
+                            continue
+                        step = BASE
+                    else:
+                        step = BASE + self.hist0.get(nx, 0.0)
+                        if o is not None and o != net:
+                            step += OVER_PEN
+                        if adj_f:
+                            step += ADJ_PEN
+                nd = d + (BASE if nx == goal else step)
+                if nd < dist.get(nx, float("inf")):
+                    dist[nx] = nd; prev[nx] = cur
+                    heapq.heappush(pq, (nd, nx))
         return None
 
-    # ---------- top-level ----------
-    def route(self, verbose: bool = False) -> BuildResult:
+    # ---------- top-level (negotiated rip-up) ----------
+    def route(self, verbose: bool = False, max_rounds: int = 1) -> BuildResult:
+        """Negotiated-congestion routing. Round 0 is the strict one-shot (fast,
+        often near-complete). If shorts remain, switch to soft mode and rip-up +
+        reroute ALL nets each round, accumulating per-cell history penalty on the
+        cells that hosted shorts, until shorts hit 0 (or max_rounds)."""
         nets = [n for n in self.pl.net_sinks
                 if self.pl.net_sources.get(n) and self.pl.net_sinks.get(n)]
 
@@ -136,9 +170,28 @@ class BuildableRouter:
             return max(abs(s[0]-k[0])+abs(s[2]-k[2]) for k in ks)
         nets.sort(key=lambda n: (len(self.pl.net_sinks[n]), span(n)))
 
+        best_res = None; best_short = 1 << 30
+        for rnd in range(max_rounds):
+            soft = rnd > 0
+            res = self._route_once(nets, soft=soft, verbose=verbose and rnd == 0)
+            shorts, _ = self._count_shorts(res)
+            if verbose:
+                print(f"  round {rnd} (soft={soft}): shorts={shorts} "
+                      f"failed={len(res.failed)}", flush=True)
+            if shorts < best_short or (shorts == best_short and
+                                       len(res.failed) < len(best_res.failed)):
+                best_short = shorts; best_res = res
+            if shorts == 0 and not res.failed:
+                return res
+            # bump history on cells that shorted this round, so next round avoids
+            self._bump_history(res)
+        return best_res
+
+    def _route_once(self, nets, soft: bool, verbose: bool = False) -> BuildResult:
+        # fresh occupancy each round (rip-up everything)
+        self.owner0 = {}; self.owner2 = {}; self.support1 = {}
         placements: Dict[str, List[tuple]] = {n: [] for n in nets}
         need_bridge: List[Tuple[str, XZ]] = []
-
         y0 = self.base_y
         for net in nets:
             s = self.pl.net_sources[net]
@@ -148,7 +201,7 @@ class BuildableRouter:
             first = True
             for k in sorted(self.pl.net_sinks[net], key=lambda k: abs(s[0]-k[0])+abs(s[2]-k[2])):
                 goal = (k[0], k[2])
-                path = self._plane_bfs(tree, goal, net)
+                path = self._plane_bfs(tree, goal, net, soft=soft)
                 if path is None:
                     need_bridge.append((net, goal))
                     continue
@@ -160,22 +213,49 @@ class BuildableRouter:
                 if first:
                     tree.discard(src_xz)
                     first = False
-
         flat_ok = len(nets) - len({n for n, _ in need_bridge})
         if verbose:
             print(f"  y=0 routed: {flat_ok}/{len(nets)} flat, "
                   f"{len(need_bridge)} sink(s) need bridge", flush=True)
-
         bridges: Dict[str, int] = {n: 0 for n in nets}
         climbed: Dict[str, Set[XZ]] = {}
-        # route bridges sink-by-sink; sort so a net's sinks are consecutive
         for net, goal in sorted(need_bridge, key=lambda ng: ng[0]):
             gadget = self._bridge(net, goal, placements, climbed)
             if gadget:
                 placements[net].extend(gadget)
                 bridges[net] += 1
-
         return self._materialize(nets, placements, bridges)
+
+    def _count_shorts(self, res):
+        from route_buildable import _PLANE_SHELL
+        owner = dict(res.wire_owner)
+        for net, reps in res.repeaters.items():
+            for (pos, _f) in reps:
+                owner[pos] = net
+        seen = set(); short_cells = set()
+        for p, net in owner.items():
+            x, y, z = p
+            for dx, dz in _PLANE_SHELL:
+                q = (x+dx, y, z+dz); o = owner.get(q)
+                if o is not None and o != net:
+                    k = tuple(sorted([p, q]))
+                    if k not in seen:
+                        seen.add(k); short_cells.add(p); short_cells.add(q)
+            for dy in (1, -1):
+                q = (x, y+dy, z); o = owner.get(q)
+                if o is not None and o != net:
+                    k = tuple(sorted([p, q]))
+                    if k not in seen:
+                        seen.add(k); short_cells.add(p); short_cells.add(q)
+        return len(seen), short_cells
+
+    def _bump_history(self, res):
+        _, short_cells = self._count_shorts(res)
+        for (x, y, z) in short_cells:
+            if y == self.base_y:
+                self.hist0[(x, z)] = self.hist0.get((x, z), 0.0) + 20.0
+            else:
+                self.histC[(x, z)] = self.histC.get((x, z), 0.0) + 20.0
 
     def _net_wire_xzs(self, net, placements) -> Set[XZ]:
         """xz of this net's y=0 dust so far (bridge can start from one)."""
@@ -247,6 +327,9 @@ class BuildableRouter:
             # to its west, block0, 2 standing torches (each +2 Y, 2 inversions =
             # non-inverting), top dust at y4+1 (odd cross plane, like the trunk).
             tx = sx + 1
+            # abort if the tower column would graze a foreign wire on y0 or cross
+            if self._descent_conflict((tx, sz), net):
+                return None
             p.append(("rep", tx, y0, sz, "west"))     # repeater faces west (reads sx)
             self.owner0[(tx, sz)] = net
             yy = y0
@@ -273,7 +356,15 @@ class BuildableRouter:
             self.owner2[(x, z)] = net; self.support1[(x, z)] = net
             climbed[net].add((x, z))
         # DESCEND: +x staircase from (gx-5, y4+1) down to y0 at (gx-1), then the
-        # goal dust at gx-1 feeds the west-facing input repeater at gx.
+        # goal dust at gx-1 feeds the west-facing input repeater at gx. Register
+        # every descent xz on BOTH the cross plane (owner2) and y0 (owner0) so
+        # later bridges' cross-BFS and y0 routing steer clear of this corridor.
+        # If any descent cell would graze a foreign wire/pin, abort this bridge
+        # (return None) instead of laying a silent short.
+        desc_xz = [(gx - 5 + i, gz) for i in range(1, 6)]   # gx-4 .. gx (last=pin)
+        for (dxc, dzc) in desc_xz[:-1]:                     # exclude the pin cell
+            if self._descent_conflict((dxc, dzc), net):
+                return None
         cx, cy = gx - 5, y4 + 1
         while cy > y0:
             cx += 1
@@ -283,7 +374,25 @@ class BuildableRouter:
             else:
                 p.append(("dust", cx, y0, gz))
             self.owner0[(cx, gz)] = net
+            self.owner2[(cx, gz)] = net       # reserve the cross column too
+            self.support1[(cx, gz)] = net
         return p
+
+    def _descent_conflict(self, xz, net):
+        """A descent column touches y0..y4 at xz. Conflict if a foreign wire is
+        at/adjacent on y0 OR on the cross plane."""
+        if self._foreign_plane(xz, net, self.owner0):
+            return True
+        if self._foreign_plane(xz, net, self.owner2):
+            return True
+        o0 = self.owner0.get(xz); o2 = self.owner2.get(xz)
+        if o0 is not None and o0 != net:
+            return True
+        if o2 is not None and o2 != net:
+            return True
+        if self._foreign_pin_adj(xz, net, xz):
+            return True
+        return False
 
     def _materialize(self, nets, placements, bridges):
         res = BuildResult({}, set(), {}, dict(bridges), [], {}, [])
