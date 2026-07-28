@@ -400,6 +400,28 @@ emit_full 现用竖直 torch 塔(默认亮 stuck-high), 要换成 via_gadget 的
 需检查 riser 横向足迹不撞邻网(纳入占用)。这是 emit 重写, 是最后一步。
 现状: via 原语全部验证✓(浅+深), 差 emit 集成 + 整芯片真值表。
 
+### emit 集成的真实复杂度 (2026-07-27, 初版 36097 blocks)
+初版 emit(所有 via 用 rise 横向展开)生成 36097 blocks 但逻辑不对, 因为:
+1. **源 via vs 汇 via 未区分**: 源引脚→trunk 用 rise(上升); 汇 trunk→引脚用 drop(下降)。
+   初版全用 rise, 汇端接反。
+2. **横向 riser 避让**: rise/drop 横向占 2+Δy 格, GPU route 没预留这些横向格 →
+   riser 会撞邻网 trunk/via → 短路。需要 route 预留 via 横向足迹, 或 emit 检测避让。
+3. **极性**: via_gadget 已保证非反相(中继器), 但源/汇 via 各自的 trunk 接入点要对齐。
+
+=> emit 集成是一个完整子任务, 不是 emit_full 小改。正确做法:
+route_partitioned 里 via 就建模成横向 rise/drop 占位(含足迹, 纳入占用+短路检测),
+routes 直接给出可 emit 的 rise/drop 段。即 **route 和 emit 统一用 via_gadget 几何**,
+而非 route 抽象竖直 via + emit 事后展开。这是 route+emit 的协同重构。
+
+### 整体状态总结 (session 末)
+分层验证链:
+- 逻辑 netlist 40/40 ✓
+- cell 物理 4/4 ✓
+- 布线抽象 0短路+全连通 ✓ (GPU route_partitioned, commit 00de1ac)
+- via 原语(rise/drop, 浅+深, 中继器刷新)全部 MCHPRS 验证 ✓ (commit 42ec8e0)
+- **待完成**: route+emit 协同用 via_gadget 几何 (via 横向足迹纳入 route 占用) → 整芯片真值表 → 游戏内建造
+所有部件验证齐备, 缺 route/emit 的 via 几何统一 (让抽象 via = 可建造 rise/drop)。
+
 ### 分层验证链现状 (3/4 层已证)
 - 逻辑 netlist 40/40 ✓ | cell 物理 4/4 ✓ | 布线 0短路+全连通 ✓
 - 整芯片物理 MCHPRS: ✗ (via↔pin 交接待解)

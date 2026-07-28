@@ -65,31 +65,44 @@ def build_full(data, netlist, placement):
     for name, pc in placement.placed.items():
         pc.cell.emit(rec, *pc.origin)
 
-    # 3. routing: dust + supports + via towers per net
+    # 3. routing per net: trunk (flat, at the net's trunk layer) + horizontal
+    #    rise/drop vias (via_gadget, verified non-inverting w/ repeater refresh).
+    from collections import Counter
+    from via_gadget import rise_cells, drop_cells
     for net, cells in data["routes"].items():
-        by_col = {}
+        # trunk layer = the layer holding most of this net's cells
+        layer_count = Counter(l for (l, gx, gz) in cells)
+        trunk_layer = layer_count.most_common(1)[0][0]
+        trunk_wy = layer_y[trunk_layer] + base_y
+        # emit trunk-layer cells flat (dust + support)
         for (l, gx, gz) in cells:
-            by_col.setdefault((gx, gz), []).append(l)
-        for (gx, gz), layers in by_col.items():
+            if l != trunk_layer:
+                continue
             wx, wz = gx+x0, gz+z0
-            layers = sorted(layers)
-            if len(layers) == 1:
-                wy = layer_y[layers[0]] + base_y
-                B(wx, wy, wz, W)
-                if wy > base_y:
-                    B(wx, wy-1, wz, S)      # support below raised dust
-            else:
-                # via torch tower. The route omits the y=0 pin cell, so the via
-                # column's lowest routed layer may be >0. Start the tower at
-                # base_y (y=0, the pin plane) so the via actually connects the
-                # gate pin at y=0 up to the trunk layer — otherwise the y0->y2
-                # segment is missing and the signal never enters/leaves the pin.
-                y = base_y
-                yhi = layer_y[layers[-1]] + base_y
-                while y < yhi:
-                    B(wx, y, wz, S)
-                    B(wx, y+1, wz, "minecraft:redstone_torch")
-                    y += 2
+            B(wx, trunk_wy, wz, W)
+            if trunk_wy > base_y:
+                B(wx, trunk_wy-1, wz, S)
+        # via columns: pin (x,z) that need to connect y0<->trunk. Identify from
+        # cells that are NOT on the trunk layer (the abstract via segments) —
+        # take their (gx,gz) as the pin columns needing a rise/drop.
+        via_cols = set((gx, gz) for (l, gx, gz) in cells if l != trunk_layer)
+        for (gx, gz) in via_cols:
+            wx, wz = gx+x0, gz+z0
+            # emit a horizontal rise from y0 at this column up to trunk_wy, then
+            # connect its top to the trunk cell here. (rise spreads in +x; the
+            # trunk dust at (wx,trunk_wy,wz) is the join point.)
+            pr, xo = rise_cells(wx, wz, base_y, trunk_wy)
+            for (rx, ry, rz, blk) in pr:
+                B(rx, ry, rz, blk)
+            # ensure the rise top dust connects to the trunk dust at (wx,...):
+            # rise ends at (xo, trunk_wy); put trunk dust bridging xo..wx if gap
+            lo, hi = min(xo, wx), max(xo, wx)
+            for bx in range(lo, hi+1):
+                B(bx, trunk_wy, wz, W)
+                if trunk_wy > base_y:
+                    B(bx, trunk_wy-1, wz, S)
+            # y0 dust at the pin column feeds the gate pin
+            B(wx, base_y, wz, W)
 
     # 4. PI injectors + PO probes
     pi_inject = {}
