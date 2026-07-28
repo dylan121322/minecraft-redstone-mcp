@@ -628,3 +628,18 @@ L3 Control/Mux/ALU_Control/Imm_Gen → L4 Forwarding/ALU。
 - **短路 = 功能错误,必须清零**;延迟/密度 = 性能,可接受。红石一处短路即整模块输出错。
 - **局部修补搬运拥塞**: 全局耦合约束下,单点错开只是把短路移到别处(实测 197→1973)。
 - **精简本身减短路**: 冗余布线(一列扩多列)= 更大相邻面 = 更多短路。最短路 = 少短路。
+
+### 几何级布线器 route_geo.py (2026-07-27, 框架跑通)
+GeoRouter: 直接产真实几何(via_gadget rise/drop), short-check 在真实格。
+alu1: 9529 blocks(比抽象+emit 27499 小), bbox x[-15,564] y[0,44] z[0,59]。
+但 global=18(z-range冲突估计太粗→过多网判global), shorts=121。
+第一版各网独立 emit 不避让 → 横向 rise/drop + trunk z-jog 在真实几何互撞。
+
+### 最终集成 = 几何级 negotiated 布线器(非拼接)
+所有零件验证齐(cell/via/rise/drop/浅层多网 PASS),但让它们在真实几何 0 短路,
+需**占用感知布线**: 每段避开已占格 + negotiated。= 在几何级重做 negotiated
+(GpuRouter 是抽象格级, 现要几何级)。route_geo.py 框架就位, 缺:
+1. conflict 估计精确化(现 z-range 太粗判 18 global)
+2. 占用感知: rise/drop/trunk 布线查 self.owner 避让, 撞则换层/绕行
+3. negotiated 迭代消残余短路
+零件全验证, 是确定性工程(无未知原语), 但需完整几何级布线实现。
