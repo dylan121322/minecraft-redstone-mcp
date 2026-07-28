@@ -384,6 +384,22 @@ y_top=10 drive=1 仍断: rise 爬 10 级 dust 衰减到顶=6, +trunk+drop 归0�
 降层数(CAP=3)更实际。下一步: route 改 CAP=3 + via 横向足迹预留 + rise 内中继, 重验。
 现状: drop 几何✓, 浅 via 完整链✓, 深 via 衰减中继待解。
 
+### ★ 深层 via 衰减解决 (中继器刷新, 2026-07-27)
+via_gadget 三处加中继器刷新: rise 内每 10 级 + trunk 起点 + drop 内每 10 级。
+**y_top=4/10/20/30 完整链全通 2/2** (drive0→15 drive1→0)。覆盖 alu1 最深 via(~29层)。
+时序: 中继器有 delay 但组合逻辑 alu1 给足 tick(120)后稳定, 真值表无害。
+(时序电路才需管 delay 累积; alu1 无触发器/时钟。)
+
+via 原语现已完整可靠: 任意深度、非反相、信号足、0短路。rise/drop footprint 已知。
+
+### 待完成: emit_full 集成横向 via + 整芯片 MCHPRS
+emit_full 现用竖直 torch 塔(默认亮 stuck-high), 要换成 via_gadget 的横向 rise/drop。
+但 route 的 via 是竖直单列(gx,gz 跨层), rise/drop 是横向(占 2+Δy / Δy 格 x)。
+方案: emit 时按"每网: 源 dust → rise 上 trunk层 → trunk 主干 → 各 sink drop 下引脚"
+重构 emit(不按列分组), 横向 riser 就近展开。alu1 层内稀疏, trunk 层有横向空间。
+需检查 riser 横向足迹不撞邻网(纳入占用)。这是 emit 重写, 是最后一步。
+现状: via 原语全部验证✓(浅+深), 差 emit 集成 + 整芯片真值表。
+
 ### 分层验证链现状 (3/4 层已证)
 - 逻辑 netlist 40/40 ✓ | cell 物理 4/4 ✓ | 布线 0短路+全连通 ✓
 - 整芯片物理 MCHPRS: ✗ (via↔pin 交接待解)

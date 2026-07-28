@@ -49,7 +49,7 @@ def rise_cells(x, z, y0, y_top):
     # current height: dust -> repeater -> resume climbing.
     since_refresh = 1
     while cy < y_top:
-        if since_refresh >= 12:
+        if since_refresh >= 10:
             # flat refresh at height cy: extend +x with a repeater on a support
             cx += 1
             p.append((cx, cy-1, z, S)); p.append((cx, cy, z, rep_w()))
@@ -77,12 +77,24 @@ def drop_cells(x, z, y_top, y0):
     # cy>y0+1 bound jumped y2->y0 with no y1 dust) breaks the chain.
     p = []
     cx = x; cy = y_top
+    since = 0
     while cy > y0:
+        if since >= 10 and cy > y0 + 1:
+            # flat refresh landing at current height before continuing to drop.
+            # A descending dust chain loses 1/step; a deep drop (alu1 ~29 layers)
+            # would decay to 0 without this. Repeater re-drives to 15. delay is
+            # harmless for combinational alu1 (settles given enough ticks).
+            cx += 1
+            p.append((cx, cy-1, z, S)); p.append((cx, cy, z, rep_w()))
+            cx += 1
+            p.append((cx, cy-1, z, S)); p.append((cx, cy, z, W))
+            since = 0
         cx += 1
         cy -= 1
         if cy > y0:
             p.append((cx, cy-1, z, S))   # support under this step's dust
         p.append((cx, cy, z, W))         # dust at each descending level (incl y0)
+        since += 1
     return p, cx
 
 
