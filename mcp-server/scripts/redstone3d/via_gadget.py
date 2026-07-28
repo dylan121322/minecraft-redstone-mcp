@@ -42,26 +42,47 @@ def rise_cells(x, z, y0, y_top):
     p.append((cx, cy, z, S))
     p.append((cx, cy+1, z, W))
     cy += 1
-    # continue climbing one level per +x until y_top
+    # continue climbing one level per +x until y_top, inserting a repeater
+    # refresh every ~12 climbed levels so the signal never decays below 1 on a
+    # tall via (a diagonal dust climb loses 1 strength per level; 29-layer alu1
+    # would otherwise decay to 0). The refresh is a flat 2-cell landing at the
+    # current height: dust -> repeater -> resume climbing.
+    since_refresh = 1
     while cy < y_top:
+        if since_refresh >= 12:
+            # flat refresh at height cy: extend +x with a repeater on a support
+            cx += 1
+            p.append((cx, cy-1, z, S)); p.append((cx, cy, z, rep_w()))
+            cx += 1
+            p.append((cx, cy-1, z, S)); p.append((cx, cy, z, W))
+            since_refresh = 0
         cx += 1
         p.append((cx, cy, z, S))
         p.append((cx, cy+1, z, W))
         cy += 1
+        since_refresh += 1
     return p, cx  # dust now at (cx, y_top, z)
 
 
 def drop_cells(x, z, y_top, y0):
-    """+x staircase descent from (x,y_top) to (x_out,y0). Returns (placements,x_out)."""
+    """+x staircase descent from (x,y_top) to (x_out,y0). Returns (placements,x_out).
+    Each +x step drops one Y-level: at (cx, cy) place dust on a block at (cx,cy-1);
+    the previous-higher dust connects DOWN to it (see-below rule). Continue until
+    the dust sits at y0 on the floor. NO extra final dust (that overwrote the last
+    step's block at the same cell — the drop-segment break)."""
+    # Descend one Y-level per +x step. At target y, the dust sits at (cx, y) on a
+    # support block at (cx, y-1); the previous-higher dust at (cx-1, y+1) connects
+    # DOWN to it (see-below). Continue to y0 (dust on the floor slab, no extra
+    # support). Every intermediate level MUST get a dust — skipping one (the old
+    # cy>y0+1 bound jumped y2->y0 with no y1 dust) breaks the chain.
     p = []
     cx = x; cy = y_top
     while cy > y0:
         cx += 1
-        p.append((cx, cy-1, z, S))       # block one lower
-        p.append((cx, cy, z, W))          # dust steps down (see-below to prev)
         cy -= 1
-    # final y0 dust
-    p.append((cx, y0, z, W))
+        if cy > y0:
+            p.append((cx, cy-1, z, S))   # support under this step's dust
+        p.append((cx, cy, z, W))         # dust at each descending level (incl y0)
     return p, cx
 
 

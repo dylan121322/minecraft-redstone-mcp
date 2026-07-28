@@ -370,6 +370,20 @@ rise 顶 dust 与 trunk run 起点、trunk 末与 drop 起点的对接有断点�
 下一步: 修完整链衔接 (对齐 rise 顶/drop 起点 + 长 trunk 插 repeater), 再改 route
 预留 via 横向足迹 (rise 宽 2+Δy, drop 宽 Δy), 重新 route+emit+整芯片 MCHPRS。
 
+### drop 几何 bug 修复 + 完整链 y_top<=4 通 (2026-07-27)
+drop_cells 原 bug: (a) final dust 与最后一步 block 同格覆盖; (b) cy>y0+1 边界跳过
+中间 y1 dust → y2 直接到 y0 断链。修复: 每级降 1 层都放 dust (含 y0), 无多余 final。
+**完整链 source→rise→trunk→drop→NOT引脚 now: y_top=2 通2/2, y_top=4 通2/2** ✓✓
+(drive0→out15, drive1→out0, 正确)。架构+原语确认正确。
+
+### 剩余: 深层 via 的衰减中继
+y_top=10 drive=1 仍断: rise 爬 10 级 dust 衰减到顶=6, +trunk+drop 归0。trunk 起点
+加 1 个 repeater 不够 (rise 顶已弱/对接问题)。
+**关键判断**: alu1 CAP=1 用了 29 层 → rise 爬 58 格必然多级衰减死。改用 **CAP=3**
+层数降到 ~10 (rise 爬 <=20格), 或 rise_cells 内部每隔几级插 repeater 刷新。
+降层数(CAP=3)更实际。下一步: route 改 CAP=3 + via 横向足迹预留 + rise 内中继, 重验。
+现状: drop 几何✓, 浅 via 完整链✓, 深 via 衰减中继待解。
+
 ### 分层验证链现状 (3/4 层已证)
 - 逻辑 netlist 40/40 ✓ | cell 物理 4/4 ✓ | 布线 0短路+全连通 ✓
 - 整芯片物理 MCHPRS: ✗ (via↔pin 交接待解)
