@@ -114,7 +114,11 @@ def place(netlist: dict, origin: Pos = (0, 0, 0),
     net_sources: Dict[str, Pos] = {}
     net_sinks: Dict[str, List[Pos]] = {}
 
-    cur_x = ox0 + 2  # leave room for primary-input injection at west
+    # Leave a WIDE west channel for primary-input fan-out: all PIs originate on
+    # the x=ox0 column and must fan to first-level gate inputs; a 1-wide gap
+    # (the old ox0+2) forced every PI net through x=ox0+1 => guaranteed adjacency
+    # shorts. Give them a full col_gap-wide channel.
+    cur_x = ox0 + 2 + col_gap
     for lv, names in enumerate(levels):
         col_width = 0
         cur_z = oz0
@@ -147,12 +151,15 @@ def place(netlist: dict, origin: Pos = (0, 0, 0),
         cur_x += col_width + col_gap
 
     # Primary inputs: injection positions on the west edge, one z-row each
+    # spread PIs apart in z (>=4) so their fan-out wires don't run adjacent as
+    # they leave the west edge.
     primary_inputs: Dict[str, Pos] = {}
     pi_z = oz0
+    pi_step = max(4, row_gap)
     for net in netlist.get("inputs", []):
         primary_inputs[net] = (ox0, oy0, pi_z)
         net_sources[net] = (ox0, oy0, pi_z)  # PI drives the net
-        pi_z += 2
+        pi_z += pi_step
 
     # Primary outputs: read positions on the east edge
     primary_outputs: Dict[str, Pos] = {}

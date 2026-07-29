@@ -243,18 +243,36 @@ class BuildableRouter:
                 bridges[net] += 1
         return self._materialize(nets, placements, bridges)
 
+    # a repeater only connects along its facing axis (front/back); its sides and
+    # diagonals are electrically isolated (verified test_rep_side). Map facing ->
+    # the ONLY two offsets that can short it.
+    _REP_AXIS = {"west": {(1, 0), (-1, 0)}, "east": {(1, 0), (-1, 0)},
+                 "north": {(0, 1), (0, -1)}, "south": {(0, 1), (0, -1)}}
+
     def _count_shorts(self, res):
         from route_buildable import _PLANE_SHELL
         owner = dict(res.wire_owner)
+        rep_face = {}
         for net, reps in res.repeaters.items():
-            for (pos, _f) in reps:
-                owner[pos] = net
+            for (pos, f) in reps:
+                owner[pos] = net; rep_face[pos] = f
+
+        def couples(a, b, off):
+            # off is the (dx,dz) from a to b. If a (or b) is a repeater, the
+            # coupling only counts along that repeater's facing axis.
+            if a in rep_face and off not in self._REP_AXIS[rep_face[a]]:
+                return False
+            boff = (-off[0], -off[1])
+            if b in rep_face and boff not in self._REP_AXIS[rep_face[b]]:
+                return False
+            return True
+
         seen = set(); short_cells = set()
         for p, net in owner.items():
             x, y, z = p
             for dx, dz in _PLANE_SHELL:
                 q = (x+dx, y, z+dz); o = owner.get(q)
-                if o is not None and o != net:
+                if o is not None and o != net and couples(p, q, (dx, dz)):
                     k = tuple(sorted([p, q]))
                     if k not in seen:
                         seen.add(k); short_cells.add(p); short_cells.add(q)
@@ -342,7 +360,11 @@ class BuildableRouter:
             s = self.pl.net_sources[net]
             sx, sz = s[0], s[2]
             tx = sx + 1
-            if self._descent_conflict((tx, sz), net):
+            # tower is 1x1 vertical: only the repeater sits on y0 (rising to the
+            # cross plane immediately). A repeater only conducts front/back, so a
+            # foreign dust merely GRAZING its side does not short — only reject if
+            # the repeater cell itself is taken or the pin-adjacency is violated.
+            if self._tower_conflict((tx, sz), net):
                 return None
             p.append(("rep", tx, y0, sz, "west"))     # repeater faces west (reads sx)
             self.owner0[(tx, sz)] = net
@@ -385,6 +407,33 @@ class BuildableRouter:
             self.owner0[(cx, gz)] = net
             self.support1[(cx, gz)] = net
         return p
+
+    def _tower_conflict(self, xz, net):
+        """1x1 vertical tower base (a repeater facing WEST) at xz. A repeater
+        couples only front/back (verified isolated on the sides), so:
+          - reject if the cell itself is owned / is a foreign pin;
+          - reject if a foreign wire is at the repeater's FRONT (west, x-1) or
+            BACK/OUTPUT (east, x+1) — those DO short;
+          - reject if a foreign pin is orthogonally adjacent.
+        Side dust (z±1) and diagonals are harmless and allowed (this is what lets
+        a tower stand in a congested channel)."""
+        o = self.owner0.get(xz)
+        if o is not None and o != net:
+            return True
+        if xz in self.pin_net and self.pin_net[xz] != net:
+            return True
+        # front/back (the west-facing repeater's conducting axis)
+        for dx in (-1, 1):
+            q = (xz[0]+dx, xz[1])
+            oo = self.owner0.get(q)
+            if oo is not None and oo != net:
+                return True
+        for dx, dz in _H:
+            q = (xz[0]+dx, xz[1]+dz)
+            po = self.pin_net.get(q)
+            if po is not None and po != net:
+                return True
+        return False
 
     def _descent_conflict(self, xz, net):
         """A descent column touches y0..y4 at xz. Conflict if a foreign wire is
