@@ -65,8 +65,14 @@ class BuildableRouter:
         self.bz = (mn[2]-margin, mx[2]+margin)
         self.base_y = mn[1]
         self.owner0: Dict[XZ, str] = {}    # y=0 wire owner
-        self.owner2: Dict[XZ, str] = {}    # y=2 bridge wire owner
+        self.owner2: Dict[XZ, str] = {}    # legacy single cross-plane (unused now)
         self.support1: Dict[XZ, str] = {}  # y=1 support/block owner
+        # Per-net cross plane: each bridged net gets its OWN cross Y (y4, y6, ...)
+        # so different nets' cross wires are on different layers and can never be
+        # adjacent => cross-plane shorts are structurally impossible. owner_cross
+        # is indexed by cross-Y then xz. net_cross_y maps a net to its layer.
+        self.owner_cross: Dict[int, Dict[XZ, str]] = {}
+        self.net_cross_y: Dict[str, int] = {}
         # negotiated-congestion history: per-cell penalty accumulated across
         # rip-up rounds. A cell that hosted a short in a prior round gets a
         # higher cost, so nets negotiate away from contested cells over rounds.
@@ -190,6 +196,7 @@ class BuildableRouter:
     def _route_once(self, nets, soft: bool, verbose: bool = False) -> BuildResult:
         # fresh occupancy each round (rip-up everything)
         self.owner0 = {}; self.owner2 = {}; self.support1 = {}
+        self.owner_cross = {}; self.net_cross_y = {}
         placements: Dict[str, List[tuple]] = {n: [] for n in nets}
         need_bridge: List[Tuple[str, XZ]] = []
         y0 = self.base_y
@@ -219,6 +226,16 @@ class BuildableRouter:
                   f"{len(need_bridge)} sink(s) need bridge", flush=True)
         bridges: Dict[str, int] = {n: 0 for n in nets}
         climbed: Dict[str, Set[XZ]] = {}
+        # assign each bridged net its OWN cross layer (y4, y8, y12, ...): even
+        # torch count (cross_y%4==0 => cross_y/2 even => non-inverting) AND
+        # different nets' cross planes >=4 apart => never adjacent => 0 cross
+        # shorts by construction.
+        bridge_nets = []
+        for net, _g in sorted(need_bridge, key=lambda ng: ng[0]):
+            if net not in bridge_nets:
+                bridge_nets.append(net)
+        for i, net in enumerate(bridge_nets):
+            self.net_cross_y[net] = y0 + 4 * (i + 1)
         for net, goal in sorted(need_bridge, key=lambda ng: ng[0]):
             gadget = self._bridge(net, goal, placements, climbed)
             if gadget:
@@ -267,26 +284,24 @@ class BuildableRouter:
         out.add((s[0], s[2]))
         return out
 
-    def _y2_free(self, xz, net):
-        """Can net's y=2 bridge dust occupy xz? Reject if a FOREIGN y=2 wire is
-        in the 8-neighborhood (Agent B: parallel y=2 need sep>=2, and diagonal
-        y=2 also couples) or a foreign y=1 support is here. Crossings over y=0
-        are FREE (Agent B), so we ignore owner0 entirely on the y=2 plane."""
+    def _y2_free(self, xz, net, cy):
+        """Can net's cross dust occupy xz on cross-Y=cy? Only same-layer foreign
+        cross wires matter (different cross layers are >=2 apart in Y => isolated
+        like H/V planes). Reject if a foreign cross wire on THIS layer is in the
+        8-neighbourhood. y0 crossings are free (different plane)."""
         if not self._in_box(xz):
             return False
-        o = self.owner2.get(xz)
+        oc = self.owner_cross.setdefault(cy, {})
+        o = oc.get(xz)
         if o is not None and o != net:
             return False
-        so = self.support1.get(xz)
-        if so is not None and so != net:
-            return False
         for dx, dz in _PLANE_SHELL:
-            o = self.owner2.get((xz[0]+dx, xz[1]+dz))
+            o = oc.get((xz[0]+dx, xz[1]+dz))
             if o is not None and o != net:
                 return False
         return True
 
-    def _y2_bfs(self, sources, goal, net):
+    def _y2_bfs(self, sources, goal, net, cy):
         prev = {}; seen = set(sources); q = deque(sources)
         while q:
             cur = q.popleft()
@@ -300,7 +315,7 @@ class BuildableRouter:
                 nx = (cur[0]+dx, cur[1]+dz)
                 if nx in seen:
                     continue
-                if nx != goal and not self._y2_free(nx, net):
+                if nx != goal and not self._y2_free(nx, net, cy):
                     continue
                 seen.add(nx); prev[nx] = cur; q.append(nx)
         return None
@@ -316,65 +331,58 @@ class BuildableRouter:
         the y0-adjacency shorts; the higher cross plane (y4 vs y2) keeps bridge
         wires clear of the y0 signal plane. `climbed` maps net -> set of y=4 xz
         it occupies. Returns typed placements or None."""
-        y0 = self.base_y; y4 = y0 + 4
+        y0 = self.base_y
+        cy_cross = self.net_cross_y[net]        # this net's dedicated cross Y
+        ncl = (cy_cross - y0) // 2              # torch count (even => cross_y%4==0)
         gx, gz = goal_xz
         p = []
+        depth = cy_cross + 1 - y0              # staircase length (dust plane = cross+1)
 
         if net not in climbed:
             s = self.pl.net_sources[net]
             sx, sz = s[0], s[2]
-            # 1x1 torch tower at (sx+1, sz): repeater feed reads the source dust
-            # to its west, block0, 2 standing torches (each +2 Y, 2 inversions =
-            # non-inverting), top dust at y4+1 (odd cross plane, like the trunk).
             tx = sx + 1
-            # abort if the tower column would graze a foreign wire on y0 or cross
             if self._descent_conflict((tx, sz), net):
                 return None
             p.append(("rep", tx, y0, sz, "west"))     # repeater faces west (reads sx)
             self.owner0[(tx, sz)] = net
             yy = y0
-            for _ in range(2):
+            for _ in range(ncl):
                 p.append(("block", tx, yy, sz))       # block
                 p.append(("torch", tx, yy+1, sz))     # standing torch
                 yy += 2
-            # top dust on the final block, at y4+1
-            p.append(("dust", tx, y4+1, sz))
-            self.owner2[(tx, sz)] = net; self.support1[(tx, sz)] = net
+            p.append(("dust", tx, cy_cross+1, sz))    # top dust on the cross plane
+            self.owner_cross.setdefault(cy_cross, {})[(tx, sz)] = net
+            self.support1[(tx, sz)] = net
             climbed[net] = {(tx, sz)}
 
-        # cross-plane BFS (y=4+1 dust) from the net's tree to the descent top at
-        # (gx-4, gz): a 4-cell +x staircase then lands y0 at gx-1 (pin west feed),
-        # never covering the pin at gx.
-        y4_top = (gx - 5, gz)
-        path = self._y2_bfs(set(climbed[net]), y4_top, net)
+        # cross-plane BFS to the descent top at (gx-depth, gz), so the +x
+        # staircase lands y0 at gx-1 (pin west feed), never covering the pin.
+        cross_top = (gx - depth, gz)
+        path = self._y2_bfs(set(climbed[net]), cross_top, net, cy_cross)
         if path is None:
             return None
+        oc = self.owner_cross.setdefault(cy_cross, {})
         for (x, z) in path:
             if (x, z) in climbed[net]:
                 continue
-            p.append(("support", x, y4, z)); p.append(("dust", x, y4+1, z))
-            self.owner2[(x, z)] = net; self.support1[(x, z)] = net
+            p.append(("support", x, cy_cross, z)); p.append(("dust", x, cy_cross+1, z))
+            oc[(x, z)] = net; self.support1[(x, z)] = net
             climbed[net].add((x, z))
-        # DESCEND: +x staircase from (gx-5, y4+1) down to y0 at (gx-1), then the
-        # goal dust at gx-1 feeds the west-facing input repeater at gx. Register
-        # every descent xz on BOTH the cross plane (owner2) and y0 (owner0) so
-        # later bridges' cross-BFS and y0 routing steer clear of this corridor.
-        # If any descent cell would graze a foreign wire/pin, abort this bridge
-        # (return None) instead of laying a silent short.
-        desc_xz = [(gx - 5 + i, gz) for i in range(1, 6)]   # gx-4 .. gx (last=pin)
-        for (dxc, dzc) in desc_xz[:-1]:                     # exclude the pin cell
-            if self._descent_conflict((dxc, dzc), net):
+        # DESCEND staircase from (gx-depth, cy_cross+1) to y0 at (gx-1). Check the
+        # y0 landing cells for foreign conflict; abort (None) rather than short.
+        for i in range(1, depth):
+            if self._descent_conflict((gx - depth + i, gz), net):
                 return None
-        cx, cy = gx - 5, y4 + 1
-        while cy > y0:
+        cx, cyy = gx - depth, cy_cross + 1
+        while cyy > y0:
             cx += 1
-            cy -= 1
-            if cy > y0:
-                p.append(("block", cx, cy-1, gz)); p.append(("dust", cx, cy, gz))
+            cyy -= 1
+            if cyy > y0:
+                p.append(("block", cx, cyy-1, gz)); p.append(("dust", cx, cyy, gz))
             else:
                 p.append(("dust", cx, y0, gz))
             self.owner0[(cx, gz)] = net
-            self.owner2[(cx, gz)] = net       # reserve the cross column too
             self.support1[(cx, gz)] = net
         return p
 
@@ -383,12 +391,8 @@ class BuildableRouter:
         at/adjacent on y0 OR on the cross plane."""
         if self._foreign_plane(xz, net, self.owner0):
             return True
-        if self._foreign_plane(xz, net, self.owner2):
-            return True
-        o0 = self.owner0.get(xz); o2 = self.owner2.get(xz)
+        o0 = self.owner0.get(xz)
         if o0 is not None and o0 != net:
-            return True
-        if o2 is not None and o2 != net:
             return True
         if self._foreign_pin_adj(xz, net, xz):
             return True
