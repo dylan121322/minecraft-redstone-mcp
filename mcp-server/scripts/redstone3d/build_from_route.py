@@ -47,6 +47,10 @@ def emit_blocks(setter: Callable[[int, int, int, str], None],
         for (x, y, z) in ws:
             setter(x, y, z, W)
 
+    # 4.5 standing torches (1x1 bridge tower rungs)
+    for (x, y, z) in getattr(res, "torches", []):
+        setter(x, y, z, "minecraft:redstone_torch")
+
     # 5. repeaters
     for net, reps in res.repeaters.items():
         for (pos, facing) in reps:

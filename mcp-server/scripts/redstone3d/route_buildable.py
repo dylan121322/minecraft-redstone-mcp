@@ -144,18 +144,15 @@ class BuildableRouter:
                     o = self.owner0.get(nx)
                     adj_f = self._foreign_plane(nx, net, self.owner0) or \
                             self._foreign_pin_adj(nx, net, goal)
-                    if not soft:
-                        if o is not None and o != net:
-                            continue
-                        if adj_f:
-                            continue
-                        step = BASE
-                    else:
-                        step = BASE + self.hist0.get(nx, 0.0)
-                        if o is not None and o != net:
-                            step += OVER_PEN
-                        if adj_f:
-                            step += ADJ_PEN
+                    # HARD constraints always (no overlap, no grazing) — keeps
+                    # shorts at 0. History is a soft COST that steers this net's
+                    # own path off cells that blocked others, without ever
+                    # allowing a real conflict.
+                    if o is not None and o != net:
+                        continue
+                    if adj_f:
+                        continue
+                    step = BASE + self.hist0.get(nx, 0.0)
                 nd = d + (BASE if nx == goal else step)
                 if nd < dist.get(nx, float("inf")):
                     dist[nx] = nd; prev[nx] = cur
@@ -163,34 +160,43 @@ class BuildableRouter:
         return None
 
     # ---------- top-level (negotiated rip-up) ----------
-    def route(self, verbose: bool = False, max_rounds: int = 1) -> BuildResult:
-        """Negotiated-congestion routing. Round 0 is the strict one-shot (fast,
-        often near-complete). If shorts remain, switch to soft mode and rip-up +
-        reroute ALL nets each round, accumulating per-cell history penalty on the
-        cells that hosted shorts, until shorts hit 0 (or max_rounds)."""
+    def route(self, verbose: bool = False, max_rounds: int = 40) -> BuildResult:
+        """Negotiated rip-up. Every round rips up and reroutes ALL nets under the
+        HARD (non-overlapping) constraints; congestion is negotiated via (a) the
+        routing ORDER — nets that failed last round go FIRST this round so they
+        seize their scarce escape channels before flexible nets — and (b) a
+        per-cell history penalty that pushes the *competitors* off contested
+        cells. No soft overlap is ever allowed (that made shorts explode); only
+        order + history move, so shorts stay 0 while unrouted nets drop to 0."""
         nets = [n for n in self.pl.net_sinks
                 if self.pl.net_sources.get(n) and self.pl.net_sinks.get(n)]
 
         def span(n):
             s = self.pl.net_sources[n]; ks = self.pl.net_sinks[n]
             return max(abs(s[0]-k[0])+abs(s[2]-k[2]) for k in ks)
-        nets.sort(key=lambda n: (len(self.pl.net_sinks[n]), span(n)))
+        base_order = sorted(nets, key=lambda n: (len(self.pl.net_sinks[n]), span(n)))
 
-        best_res = None; best_short = 1 << 30
+        best_res = None; best_key = (1 << 30, 1 << 30)
+        priority: List[str] = []          # nets to route first (grew from failures)
         for rnd in range(max_rounds):
-            soft = rnd > 0
-            res = self._route_once(nets, soft=soft, verbose=verbose and rnd == 0)
+            order = priority + [n for n in base_order if n not in priority]
+            res = self._route_once(order, soft=False, verbose=verbose and rnd == 0)
             shorts, _ = self._count_shorts(res)
-            if verbose:
-                print(f"  round {rnd} (soft={soft}): shorts={shorts} "
-                      f"failed={len(res.failed)}", flush=True)
-            if shorts < best_short or (shorts == best_short and
-                                       len(res.failed) < len(best_res.failed)):
-                best_short = shorts; best_res = res
+            key = (len(res.failed), shorts)
+            if verbose and (rnd < 3 or key < best_key):
+                print(f"  round {rnd}: failed={len(res.failed)} shorts={shorts} "
+                      f"order_head={order[:3]}", flush=True)
+            if key < best_key:
+                best_key = key; best_res = res
             if shorts == 0 and not res.failed:
+                if verbose:
+                    print(f"  converged at round {rnd}", flush=True)
                 return res
-            # bump history on cells that shorted this round, so next round avoids
-            self._bump_history(res)
+            # failed nets get top priority next round; add their blockers' history
+            for n in res.failed:
+                if n not in priority:
+                    priority.insert(0, n)
+            self._bump_blocker_history(res)
         return best_res
 
     def _route_once(self, nets, soft: bool, verbose: bool = False) -> BuildResult:
@@ -234,8 +240,27 @@ class BuildableRouter:
         for net, _g in sorted(need_bridge, key=lambda ng: ng[0]):
             if net not in bridge_nets:
                 bridge_nets.append(net)
-        for i, net in enumerate(bridge_nets):
-            self.net_cross_y[net] = y0 + 4 * (i + 1)
+        # COLOR bridge nets so non-conflicting ones SHARE a cross layer, keeping
+        # cross Y (and thus descent depth) low. Two bridge nets conflict if their
+        # source→sink x-spans overlap (their cross runs could then be adjacent on
+        # a shared layer). Greedy graph colouring; colour c -> cross Y = y0+4*c.
+        def xspan(n):
+            xs = [self.pl.net_sources[n][0]] + [k[0] for k in self.pl.net_sinks[n]]
+            return (min(xs), max(xs))
+        spans = {n: xspan(n) for n in bridge_nets}
+        def overlap(a, b):
+            la, ra = spans[a]; lb, rb = spans[b]
+            return not (ra < lb or rb < la)
+        order = sorted(bridge_nets, key=lambda n: spans[n][1] - spans[n][0], reverse=True)
+        color = {}
+        for n in order:
+            used = {color[m] for m in color if overlap(n, m)}
+            c = 1
+            while c in used:
+                c += 1
+            color[n] = c
+        for net in bridge_nets:
+            self.net_cross_y[net] = y0 + 4 * color[net]
         for net, goal in sorted(need_bridge, key=lambda ng: ng[0]):
             gadget = self._bridge(net, goal, placements, climbed)
             if gadget:
@@ -284,13 +309,22 @@ class BuildableRouter:
                         seen.add(k); short_cells.add(p); short_cells.add(q)
         return len(seen), short_cells
 
-    def _bump_history(self, res):
-        _, short_cells = self._count_shorts(res)
-        for (x, y, z) in short_cells:
-            if y == self.base_y:
-                self.hist0[(x, z)] = self.hist0.get((x, z), 0.0) + 20.0
-            else:
-                self.histC[(x, z)] = self.histC.get((x, z), 0.0) + 20.0
+    def _bump_blocker_history(self, res):
+        """For each failed net, penalise the y0 cells inside its source→sink
+        bounding box that are currently owned by OTHER nets — those are the
+        blockers occupying the escape channels. Higher history makes the blockers
+        route around next round, freeing the channel for the failed net (which
+        also goes first next round)."""
+        for net in res.failed:
+            s = self.pl.net_sources[net]
+            for k in self.pl.net_sinks[net]:
+                x0, x1 = sorted((s[0], k[0]))
+                z0, z1 = sorted((s[2], k[2]))
+                for xx in range(x0 - 1, x1 + 2):
+                    for zz in range(z0 - 1, z1 + 2):
+                        o = self.owner0.get((xx, zz))
+                        if o is not None and o != net:
+                            self.hist0[(xx, zz)] = self.hist0.get((xx, zz), 0.0) + 8.0
 
     def _net_wire_xzs(self, net, placements) -> Set[XZ]:
         """xz of this net's y=0 dust so far (bridge can start from one)."""
