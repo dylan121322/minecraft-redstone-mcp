@@ -359,24 +359,29 @@ class BuildableRouter:
         if net not in climbed:
             s = self.pl.net_sources[net]
             sx, sz = s[0], s[2]
-            tx = sx + 1
-            # tower is 1x1 vertical: only the repeater sits on y0 (rising to the
-            # cross plane immediately). A repeater only conducts front/back, so a
-            # foreign dust merely GRAZING its side does not short — only reject if
-            # the repeater cell itself is taken or the pin-adjacency is violated.
-            if self._tower_conflict((tx, sz), net):
+            # find a tower foothold via a 2-D y0 BFS from the source: the nearest
+            # cell (any direction) whose repeater base is conflict-free, reached
+            # by a clear y0 lead. Single-row +x search failed when the source row
+            # was saturated (congested PI region). The lead follows the BFS path.
+            foot = self._find_foothold(net, (sx, sz))
+            if foot is None:
                 return None
-            p.append(("rep", tx, y0, sz, "west"))     # repeater faces west (reads sx)
-            self.owner0[(tx, sz)] = net
+            (tx, tz), lead = foot
+            for (lx, lz) in lead:
+                p.append(("dust", lx, y0, lz))
+                self.owner0[(lx, lz)] = net
+            p.append(("rep", tx, y0, tz, "west"))
+            self.owner0[(tx, tz)] = net
             yy = y0
             for _ in range(ncl):
-                p.append(("block", tx, yy, sz))       # block
-                p.append(("torch", tx, yy+1, sz))     # standing torch
+                p.append(("block", tx, yy, tz))
+                p.append(("torch", tx, yy+1, tz))
                 yy += 2
-            p.append(("dust", tx, cy_cross+1, sz))    # top dust on the cross plane
-            self.owner_cross.setdefault(cy_cross, {})[(tx, sz)] = net
-            self.support1[(tx, sz)] = net
-            climbed[net] = {(tx, sz)}
+            p.append(("dust", tx, cy_cross+1, tz))
+            self.owner_cross.setdefault(cy_cross, {})[(tx, tz)] = net
+            self.support1[(tx, tz)] = net
+            climbed[net] = {(tx, tz)}
+            sz = tz  # cross BFS starts from the tower's z
 
         # cross-plane BFS to the descent top at (gx-depth, gz), so the +x
         # staircase lands y0 at gx-1 (pin west feed), never covering the pin.
@@ -407,6 +412,36 @@ class BuildableRouter:
             self.owner0[(cx, gz)] = net
             self.support1[(cx, gz)] = net
         return p
+
+    def _find_foothold(self, net, start):
+        """2-D BFS on y0 from the source to the nearest cell where a tower can
+        stand (repeater base conflict-free). Returns ((tx,tz), lead_path) where
+        lead is the y0 dust cells from just after the source to just before the
+        foothold, or None if unreachable within a bounded radius. The lead cells
+        must themselves be clear (descent_conflict-free) so the escape wire does
+        not short."""
+        prev = {}; seen = {start}; q = deque([start])
+        while q:
+            cur = q.popleft()
+            if cur != start and not self._tower_conflict(cur, net):
+                # reconstruct lead (exclude source and foothold)
+                path = [cur]
+                while path[-1] in prev:
+                    path.append(prev[path[-1]])
+                path.reverse()
+                lead = [c for c in path[1:-1]]
+                return cur, lead
+            for dx, dz in _H:
+                nx = (cur[0]+dx, cur[1]+dz)
+                if nx in seen or not self._in_box(nx):
+                    continue
+                if nx in self.cell_xz or nx in self.pin_net:
+                    continue
+                # lead cells must be clear of foreign wires/pins
+                if nx != start and self._descent_conflict(nx, net):
+                    continue
+                seen.add(nx); prev[nx] = cur; q.append(nx)
+        return None
 
     def _tower_conflict(self, xz, net):
         """1x1 vertical tower base (a repeater facing WEST) at xz. A repeater
