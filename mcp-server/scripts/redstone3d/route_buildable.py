@@ -412,17 +412,45 @@ class BuildableRouter:
             # right next to it. Hard-coding facing=west broke every tower whose
             # foothold was reached from another direction (n8's signal ran north
             # from (0,96) into a west-facing repeater at (0,95) => net dead).
+            # Verified tower geometry (test_bridge_gadget / test_via_tower):
+            #   drive cell : repeater on the ARRIVAL side, facing the incoming
+            #                cell so it reads the lead and drives the tower base
+            #   (tx, y0)   : block0
+            #   then ncl x { standing torch ; block } climbing +2 Y each
+            #   top block at y0+2*ncl == cy_cross, cross dust at cy_cross+1
+            # The repeater must NOT sit at (tx, y0) — that is block0's cell; the
+            # earlier version overwrote block0 with the repeater, leaving torches
+            # stacked on a repeater and the cross dust floating (n8's tower dead).
             prev_cell = lead[-1] if lead else (sx, sz)
             d_in = (tx - prev_cell[0], tz - prev_cell[1])
             face = FLOW_FACING.get(d_in, "west")
-            p.append(("rep", tx, y0, tz, face))
-            self.owner0[(tx, tz)] = net
+            if lead:
+                # replace the last lead dust with the driving repeater
+                p = [q for q in p if not (q[0] == "dust" and q[1] == prev_cell[0]
+                                          and q[3] == prev_cell[1])]
+                p.append(("rep", prev_cell[0], y0, prev_cell[1], face))
+                self.owner0[prev_cell] = net
+            else:
+                # tower adjacent to the source: repeater goes between them only if
+                # there is room; otherwise drive block0 straight from the source
+                # dust (a dust does power an adjacent block enough here).
+                pass
+            # the tower base cell must be a solid BLOCK; drop any y0 dust the
+            # planar routing had placed there (emit writes wires after supports,
+            # so a leftover dust would overwrite block0 and kill the tower).
+            p = [q for q in p if not (q[0] == "dust" and q[1] == tx
+                                      and q[2] == y0 and q[3] == tz)]
+            placements[net] = [q for q in placements[net]
+                               if not (q[0] == "dust" and q[1] == tx
+                                       and q[2] == y0 and q[3] == tz)]
             yy = y0
             for _ in range(ncl):
                 p.append(("block", tx, yy, tz))
                 p.append(("torch", tx, yy+1, tz))
                 yy += 2
-            p.append(("dust", tx, cy_cross+1, tz))
+            p.append(("block", tx, cy_cross, tz))       # top block
+            p.append(("dust", tx, cy_cross+1, tz))      # cross-plane dust
+            self.owner0[(tx, tz)] = net
             self.owner_cross.setdefault(cy_cross, {})[(tx, tz)] = net
             self.support1[(tx, tz)] = net
             climbed[net] = {(tx, tz)}
@@ -475,10 +503,31 @@ class BuildableRouter:
         if path is None:
             return None
         oc = self.owner_cross.setdefault(cy_cross, {})
-        for (x, z) in path:
+        # Lay the cross run, inserting a refresh repeater every <=12 cells on a
+        # STRAIGHT stretch. Dust loses 1 strength per cell, so an unrefreshed
+        # cross run longer than 15 decays to 0 — that killed most bridged nets
+        # (n13 routed 241 cells with only the y0 refreshes and read 0 at both
+        # sinks). facing = FLOW_FACING[travel] (a repeater reads the side it
+        # faces; verified in test_rep_facing).
+        run = 0
+        for i, (x, z) in enumerate(path):
             if (x, z) in climbed[net]:
                 continue
-            p.append(("support", x, cy_cross, z)); p.append(("dust", x, cy_cross+1, z))
+            run += 1
+            placed_rep = False
+            if run >= MAX_RUN - 1 and 0 < i < len(path) - 1:
+                prevc = path[i-1]; nextc = path[i+1]
+                came = (x - prevc[0], z - prevc[1])
+                leave = (nextc[0] - x, nextc[1] - z)
+                f = FLOW_FACING.get(came)
+                if f and came == leave:          # straight only
+                    p.append(("support", x, cy_cross, z))
+                    p.append(("rep", x, cy_cross+1, z, f))
+                    placed_rep = True
+                    run = 0
+            if not placed_rep:
+                p.append(("support", x, cy_cross, z))
+                p.append(("dust", x, cy_cross+1, z))
             oc[(x, z)] = net; self.support1[(x, z)] = net
             climbed[net].add((x, z))
         # emit the staircase along the chosen corridor
@@ -507,7 +556,17 @@ class BuildableRouter:
         prev = {}; seen = {start}; q = deque([start])
         while q:
             cur = q.popleft()
-            if cur != start and not self._tower_conflict(cur, net):
+            # Require at least ONE lead cell between the source and the tower:
+            # that cell becomes the driving repeater. A tower placed directly
+            # next to the source has nowhere for the repeater to go and its
+            # block0 is only weakly powered by the source dust, so the torch
+            # ladder never switches (n8's tower sat at (0,95) beside source
+            # (0,96) and stayed dead).
+            hops = 0
+            probe = cur
+            while probe in prev:
+                probe = prev[probe]; hops += 1
+            if cur != start and hops >= 1 and not self._tower_conflict(cur, net):
                 # reconstruct lead (exclude source and foothold)
                 path = [cur]
                 while path[-1] in prev:
