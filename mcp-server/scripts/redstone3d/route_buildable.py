@@ -537,7 +537,28 @@ class BuildableRouter:
                 res.wire_owner[p] = net
             for (pos, _f) in res.repeaters[net]:
                 res.wire_owner[pos] = net
-        res.failed = [n for n in nets if not placements[n]]
+        # A net counts as ROUTED only when EVERY sink is actually fed. The old
+        # test (`not placements[n]`) passed any net with at least one placement,
+        # so a net whose 2nd sink silently failed (its bridge returned None) was
+        # still reported routed — that is why "26/29 routed" produced no signal
+        # at the sinks. A sink is fed iff this net owns a wire/repeater adjacent
+        # to (or at) the pin's west feed cell.
+        failed = []
+        for n in nets:
+            if not placements[n]:
+                failed.append(n); continue
+            own = {(p[0], p[2]) for p in res.wires[n]} | \
+                  {(pos[0], pos[2]) for (pos, _f) in res.repeaters[n]}
+            bad = False
+            for k in self.pl.net_sinks.get(n, []):
+                kx, kz = k[0], k[2]
+                fed = any((kx + dx, kz + dz) in own
+                          for dx, dz in ((-1, 0), (0, 0), (0, 1), (0, -1), (1, 0)))
+                if not fed:
+                    bad = True; break
+            if bad:
+                failed.append(n)
+        res.failed = failed
         return res
 
     def _insert_repeaters(self, net, pls, res):

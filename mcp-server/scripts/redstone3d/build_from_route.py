@@ -56,8 +56,16 @@ def emit_blocks(setter: Callable[[int, int, int, str], None],
         for (pos, facing) in reps:
             setter(pos[0], pos[1], pos[2], f"minecraft:repeater[facing={facing},delay=1]")
 
-    # 6. primary inputs: drive with a redstone_block WEST of the PI pos, PI pos = wire
+    # 6. primary inputs: drive with a redstone_block WEST of the PI pos, PI pos =
+    # wire. Only clear the injection cell when the value is 0 AND no routed wire
+    # lives there — a net can legitimately route through (pos[0]-1); blanking it
+    # used to sever that net (n6 lost its (-1,0,64) dust).
+    routed_xyz = {p for ws in res.wires.values() for p in ws}
     for net, pos in pl.primary_inputs.items():
         val = input_values.get(net, 0)
-        setter(pos[0]-1, pos[1], pos[2], RBLOCK if val else "minecraft:air")
+        inj = (pos[0]-1, pos[1], pos[2])
+        if val:
+            setter(inj[0], inj[1], inj[2], RBLOCK)
+        elif inj not in routed_xyz:
+            setter(inj[0], inj[1], inj[2], "minecraft:air")
         setter(pos[0], pos[1], pos[2], W)
