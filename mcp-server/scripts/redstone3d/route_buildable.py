@@ -192,11 +192,14 @@ class BuildableRouter:
                 if verbose:
                     print(f"  converged at round {rnd}", flush=True)
                 return res
-            # failed nets get top priority next round; add their blockers' history
-            for n in res.failed:
-                if n not in priority:
-                    priority.insert(0, n)
-            self._bump_blocker_history(res)
+            # Priority = THIS round's failures only (an ever-growing priority list
+            # made the order thrash: previously-failed nets kept hogging the front
+            # and displaced others, so failed oscillated 7->11->12->4).
+            priority = list(res.failed)
+            # present-cost escalation: the penalty applied to a failed net's
+            # blockers grows with the round, so blockers are pushed off contested
+            # channels ever more strongly until the ordering stabilises.
+            self._bump_blocker_history(res, weight=8.0 * (1 + rnd))
         return best_res
 
     def _route_once(self, nets, soft: bool, verbose: bool = False) -> BuildResult:
@@ -309,7 +312,7 @@ class BuildableRouter:
                         seen.add(k); short_cells.add(p); short_cells.add(q)
         return len(seen), short_cells
 
-    def _bump_blocker_history(self, res):
+    def _bump_blocker_history(self, res, weight: float = 8.0):
         """For each failed net, penalise the y0 cells inside its source→sink
         bounding box that are currently owned by OTHER nets — those are the
         blockers occupying the escape channels. Higher history makes the blockers
@@ -324,7 +327,7 @@ class BuildableRouter:
                     for zz in range(z0 - 1, z1 + 2):
                         o = self.owner0.get((xx, zz))
                         if o is not None and o != net:
-                            self.hist0[(xx, zz)] = self.hist0.get((xx, zz), 0.0) + 8.0
+                            self.hist0[(xx, zz)] = self.hist0.get((xx, zz), 0.0) + weight
 
     def _net_wire_xzs(self, net, placements) -> Set[XZ]:
         """xz of this net's y=0 dust so far (bridge can start from one)."""
@@ -418,8 +421,48 @@ class BuildableRouter:
             sz = tz  # cross BFS starts from the tower's z
 
         # cross-plane BFS to the descent top at (gx-depth, gz), so the +x
-        # staircase lands y0 at gx-1 (pin west feed), never covering the pin.
-        cross_top = (gx - depth, gz)
+        # DESCENT CORRIDOR SEARCH. A fixed west-side +x staircase dies whenever
+        # any of its `depth` cells is contested (this was the last failure class:
+        # every remaining unrouted net failed with "DESCENT conflict"). Try
+        # several corridors — approach from the west (+x descent) or the east
+        # (-x descent), each with a small z offset — and take the first one whose
+        # whole run is clear. The landing must end orthogonally adjacent to the
+        # pin so the pin's west-facing repeater is fed without being covered.
+        cand = []
+        for dz in (0, 1, -1, 2, -2):
+            cand.append(("W", dz))     # descend eastward, land at gx-1
+            cand.append(("E", dz))     # descend westward, land at gx+1
+        chosen = None
+        for (side, dz) in cand:
+            zz = gz + dz
+            if side == "W":
+                cells = [(gx - depth + i, zz) for i in range(1, depth + 1)]
+                land = (gx - 1, zz)
+            else:
+                cells = [(gx + depth - i, zz) for i in range(1, depth + 1)]
+                land = (gx + 1, zz)
+            if any(c in self.cell_xz or c in self.pin_net for c in cells):
+                continue
+            if any(self._descent_conflict(c, net) for c in cells):
+                continue
+            # when the corridor runs on an offset row (zz != gz) the landing is
+            # not yet beside the pin: add a short y0 jog along z from the landing
+            # to the pin's feed cell, and require that jog to be clear too.
+            jog = []
+            if zz != gz:
+                step = 1 if gz > zz else -1
+                for t in range(zz + step, gz + step, step):
+                    jog.append((land[0], t))
+                if any(c in self.cell_xz or c in self.pin_net for c in jog):
+                    continue
+                if any(self._descent_conflict(c, net) for c in jog):
+                    continue
+            chosen = (side, zz, cells, jog)
+            break
+        if chosen is None:
+            return None
+        side, zz, cells, jog = chosen
+        cross_top = (cells[0][0] - (1 if side == "W" else -1), zz)
         path = self._y2_bfs(set(climbed[net]), cross_top, net, cy_cross)
         if path is None:
             return None
@@ -430,21 +473,20 @@ class BuildableRouter:
             p.append(("support", x, cy_cross, z)); p.append(("dust", x, cy_cross+1, z))
             oc[(x, z)] = net; self.support1[(x, z)] = net
             climbed[net].add((x, z))
-        # DESCEND staircase from (gx-depth, cy_cross+1) to y0 at (gx-1). Check the
-        # y0 landing cells for foreign conflict; abort (None) rather than short.
-        for i in range(1, depth):
-            if self._descent_conflict((gx - depth + i, gz), net):
-                return None
-        cx, cyy = gx - depth, cy_cross + 1
-        while cyy > y0:
-            cx += 1
+        # emit the staircase along the chosen corridor
+        cyy = cy_cross + 1
+        for (cx, cz) in cells:
             cyy -= 1
             if cyy > y0:
-                p.append(("block", cx, cyy-1, gz)); p.append(("dust", cx, cyy, gz))
+                p.append(("block", cx, cyy-1, cz)); p.append(("dust", cx, cyy, cz))
             else:
-                p.append(("dust", cx, y0, gz))
-            self.owner0[(cx, gz)] = net
-            self.support1[(cx, gz)] = net
+                p.append(("dust", cx, y0, cz))
+            self.owner0[(cx, cz)] = net
+            self.support1[(cx, cz)] = net
+        # y0 jog from the landing row to the pin's feed cell (offset corridors)
+        for (jx, jz) in jog:
+            p.append(("dust", jx, y0, jz))
+            self.owner0[(jx, jz)] = net
         return p
 
     def _find_foothold(self, net, start):

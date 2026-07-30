@@ -47,6 +47,13 @@ def emit_blocks(setter: Callable[[int, int, int, str], None],
         for (x, y, z) in ws:
             setter(x, y, z, W)
 
+    # 4.4 output stubs: the placer publishes each net's source ONE cell east of
+    # the real output pin (so the source is on open ground with 3 escape lanes
+    # instead of the single +x lane the sandwiched pin had). Emit that dust so
+    # the pin actually reaches the routed net.
+    for (pin, pub) in getattr(pl, "out_stubs", []):
+        setter(pub[0], pub[1], pub[2], W)
+
     # 4.5 standing torches (1x1 bridge tower rungs)
     for (x, y, z) in getattr(res, "torches", []):
         setter(x, y, z, "minecraft:redstone_torch")

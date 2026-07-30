@@ -47,6 +47,9 @@ class Placement:
     primary_inputs: Dict[str, Pos]   # module input net -> injection pos (west edge)
     primary_outputs: Dict[str, Pos]  # module output net -> read pos (east edge)
     bounds: Tuple[Pos, Pos]          # (min, max) absolute
+    # (real cell output pin, published source one step east). The emitter must
+    # place a dust at the published source so the pin reaches the routed net.
+    out_stubs: List[Tuple[Pos, Pos]] = field(default_factory=list)
 
     def stats(self) -> dict:
         mn, mx = self.bounds
@@ -113,6 +116,7 @@ def place(netlist: dict, origin: Pos = (0, 0, 0),
     occupancy: Set[Pos] = set()
     net_sources: Dict[str, Pos] = {}
     net_sinks: Dict[str, List[Pos]] = {}
+    out_stubs: List[Tuple[Pos, Pos]] = []   # (real output pin, published source)
 
     # Leave a WIDE west channel for primary-input fan-out: all PIs originate on
     # the x=ox0 column and must fan to first-level gate inputs; a 1-wide gap
@@ -138,10 +142,21 @@ def place(netlist: dict, origin: Pos = (0, 0, 0),
             out_pins = {p: cell.output_abs(p, cx, cy, cz) for p in cell.outputs}
             placed[cname] = PlacedCell(cname, gtype, cell, (cx, cy, cz), in_pins, out_pins)
 
-            # nets
+            # nets. The SOURCE is exposed one cell EAST of the real output pin:
+            # a 2-input cell is depth=3 with its output Q on the middle row, so
+            # the pin itself is sandwiched by the cell's own input rows and has
+            # exactly ONE escape lane (+x). Measured: 23/31 sources were starved
+            # that way, which deadlocks routing (two nets fighting for the same
+            # single lane, unfixable by negotiation). Publishing the source one
+            # step east — on open ground beyond the cell — gives every net 3
+            # escape lanes. `out_stubs` records the 1-cell dust the emitter must
+            # add to join the real pin to the published source.
             for pin, net in cdata.get("outputs", {}).items():
                 if pin in out_pins:
-                    net_sources[net] = out_pins[pin]
+                    op = out_pins[pin]
+                    ex = (op[0] + 1, op[1], op[2])
+                    net_sources[net] = ex
+                    out_stubs.append((op, ex))
             for pin, net in cdata.get("inputs", {}).items():
                 if pin in in_pins:
                     net_sinks.setdefault(net, []).append(in_pins[pin])
@@ -175,7 +190,7 @@ def place(netlist: dict, origin: Pos = (0, 0, 0),
         mn = mx = origin
 
     return Placement(placed, occupancy, net_sources, net_sinks,
-                     primary_inputs, primary_outputs, (mn, mx))
+                     primary_inputs, primary_outputs, (mn, mx), out_stubs)
 
 
 if __name__ == "__main__":
