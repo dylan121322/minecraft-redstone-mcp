@@ -27,11 +27,18 @@ def test_net(blocks, net, src, sinks, base_y):
         for (x, y, z, s) in blocks:
             sc.set_block_from_string(x, y, z, s)
         sx, sz = src[0], src[2]
-        # Force the driver: a redstone_block WEST of the source pin drives the
-        # source dust/pin. The source pin itself stays whatever the cell emitted.
-        sc.set_block_from_string(sx - 1, base_y, sz,
-                                 RB if drive else "minecraft:air")
-        sc.set_block_from_string(sx, base_y, sz, W)
+        # The placer publishes each source one cell EAST of the real gate output
+        # pin, and the routed net starts there. Drive that published cell
+        # directly with a redstone_block: this isolates the ROUTING (published
+        # source -> every sink) from the gate's internal logic, which is what we
+        # want to validate here. A block replaces the stub dust for the test.
+        # Cut the gate loose first: the real output pin sits one cell WEST of the
+        # published source, and a gate whose inputs float drives its output torch
+        # HIGH — that leaked into the net and made drive=0 read as 1. Clearing the
+        # pin isolates the routing under test.
+        sc.set_block_from_string(sx - 1, base_y, sz, "minecraft:air")
+        sc.set_block_from_string(sx, base_y, sz,
+                                 RB if drive else W)
         w = nuc.MchprsWorld.create_with_options(sc, True, False)
         w.tick(60)
         reads = []

@@ -407,7 +407,15 @@ class BuildableRouter:
             for (lx, lz) in lead:
                 p.append(("dust", lx, y0, lz))
                 self.owner0[(lx, lz)] = net
-            p.append(("rep", tx, y0, tz, "west"))
+            # The tower's base repeater must FACE the cell the signal arrives
+            # from — the last lead cell, or the source itself when the tower sits
+            # right next to it. Hard-coding facing=west broke every tower whose
+            # foothold was reached from another direction (n8's signal ran north
+            # from (0,96) into a west-facing repeater at (0,95) => net dead).
+            prev_cell = lead[-1] if lead else (sx, sz)
+            d_in = (tx - prev_cell[0], tz - prev_cell[1])
+            face = FLOW_FACING.get(d_in, "west")
+            p.append(("rep", tx, y0, tz, face))
             self.owner0[(tx, tz)] = net
             yy = y0
             for _ in range(ncl):
@@ -604,19 +612,85 @@ class BuildableRouter:
         return res
 
     def _insert_repeaters(self, net, pls, res):
-        """Walk the y=0 dust in placement order; every MAX_RUN steps replace a
-        dust with a repeater facing the flow. Bridges already have their own
-        repeater and are short, so only refresh base-plane runs."""
-        dust0 = [(pl[1], pl[2], pl[3]) for pl in pls if pl[0] == "dust" and pl[2] == self.base_y]
-        run = 0
-        for i, p in enumerate(dust0):
+        """Insert refresh repeaters on long y0 runs, oriented by the REAL signal
+        flow.
+
+        The previous version walked `placements` in list order and took the
+        direction to the next listed cell. Placement order is not flow order (a
+        net's sinks are routed one after another, so the list jumps around), which
+        produced repeaters facing a direction the signal never comes from — e.g.
+        n8 got repeater(facing=west) at (0,95) while its signal ran north from
+        (0,96), so the repeater never conducted and the whole net was dead.
+
+        Instead: BFS the net's own y0 cells outward from the source to build a
+        parent->child tree (true flow), then every MAX_RUN hops replace that cell
+        with a repeater facing the REVERSE of travel (a repeater reads the side it
+        faces): +x -> west, -x -> east, +z -> north, -z -> south.
+        """
+        y0 = self.base_y
+        cells = {(p[1], p[3]) for p in pls if p[0] == "dust" and p[2] == y0}
+        if not cells:
+            return
+        src = self.pl.net_sources.get(net)
+        if src is None:
+            return
+        start = (src[0], src[2])
+        # BFS over the net's own y0 cells (the source pin itself may not be a cell)
+        depth = {}
+        q = deque()
+        for dx, dz in _H:
+            n0 = (start[0]+dx, start[1]+dz)
+            if n0 in cells:
+                depth[n0] = 1
+                q.append((n0, (dx, dz)))
+        # First pass: BFS to record each cell's arrival direction and parent.
+        arrive = {}
+        while q:
+            cur, came = q.popleft()
+            arrive[cur] = came
+            for dx, dz in _H:
+                nx = (cur[0]+dx, cur[1]+dz)
+                if nx in cells and nx not in depth:
+                    depth[nx] = depth[cur] + 1
+                    q.append((nx, (dx, dz)))
+        # Second pass: a repeater may only sit on a STRAIGHT run — it reads the
+        # side it faces and drives the opposite one, so on a corner (arrival
+        # direction != departure direction) its output points at empty space and
+        # the net dies there. n8 broke exactly so: a repeater at (0,82) faced
+        # south (arriving -z) while the path actually turned +x.
+        children = {}
+        for c, came in arrive.items():
+            par = (c[0]-came[0], c[1]-came[1])
+            children.setdefault(par, []).append(c)
+        # Walk each root-to-leaf branch in flow order, carrying a distance
+        # counter, and refresh at the FIRST straight cell at/after the threshold.
+        # Requiring the repeater to land exactly on depth%MAX_RUN==0 was too
+        # strict: if that cell happened to be a corner it was skipped and no
+        # refresh happened at all, so a long branch decayed to 0 (n8's 205-cell
+        # net died even though it was fully connected).
+        def straight(c):
+            came = arrive.get(c)
+            kids = children.get(c, [])
+            if came is None or len(kids) != 1:
+                return None
+            k = kids[0]
+            if (k[0]-c[0], k[1]-c[1]) != came:
+                return None
+            return FLOW_FACING.get(came)
+
+        roots = [c for c in arrive if depth.get(c) == 1]
+        stack = [(rc, 0) for rc in roots]
+        placed_rep = set()
+        while stack:
+            c, run = stack.pop()
             run += 1
-            if run >= MAX_RUN and i+1 < len(dust0):
-                nxt = dust0[i+1]
-                d = (nxt[0]-p[0], nxt[2]-p[2])
-                if nxt[1] == p[1] and abs(d[0])+abs(d[1]) == 1:  # adjacent horizontal
-                    f = FLOW_FACING.get(d)
-                    if f and p in res.wires[net]:
-                        res.repeaters[net].append((p, f))
-                        res.wires[net].discard(p)
-                        run = 0
+            if run >= MAX_RUN - 1:
+                f = straight(c)
+                p3 = (c[0], y0, c[1])
+                if f and p3 in res.wires[net] and p3 not in placed_rep:
+                    res.repeaters[net].append((p3, f))
+                    res.wires[net].discard(p3)
+                    placed_rep.add(p3)
+                    run = 0
+            for k in children.get(c, []):
+                stack.append((k, run))
