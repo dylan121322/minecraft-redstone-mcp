@@ -91,9 +91,13 @@ class DeliveryBox:
         RUN = 10                                      # levels between landings
         x, y = ax, ay
         # `in` is a west-facing REPEATER, not dust: a bare dust input couples to
-        # whatever sits beside it (measured 13 with the source cut). Same reason as
-        # the gate pins and TowerBox.
+        # whatever sits beside it (measured 13 with the source cut). The repeater's
+        # OUTPUT lands one cell EAST at the same height — that cell must be dust,
+        # and the first descending step starts below it. Without this landing the
+        # repeater drove empty air and the staircase never saw the signal.
         interior[(x, y, az)] = "minecraft:repeater[facing=west,delay=1]"
+        x += 1
+        interior[(x, y, az)] = W          # the repeater's output landing
         since = 0
         for _ in range(H):
             x += 1
