@@ -67,6 +67,11 @@ class Connector:
         ax, ay, az = self.a_out
         bx, by, bz = self.b_in
         assert ay == by, "connector endpoints must share a plane"
+        # Route to the REPEATER FEED, not the repeater itself, before any loop uses
+        # the coordinates. Doing this after the legs meant the path still ran to the
+        # repeater cell and covered it with dust (measured: x=113 W where db.in sat).
+        if self.b_is_repeater:
+            bx = bx - 1
         y = ay
         body: Dict[Pos, str] = {}
 
@@ -106,16 +111,9 @@ class Connector:
             else:
                 body[(bx, y, z)] = W
 
-        # The final cell is a REPEATER so the connector ends with a strong drive.
-        # A weak 0 cannot switch a downstream input torch OFF, which left tower
-        # deliveries reading a constant 13-14 (default-lit torch) with the source
-        # cut. The repeater's output is the connector's b_cell.
         self.a_cell = self.a_out
-        self.b_cell = (bx - 1, by, bz) if self.b_is_repeater else self.b_in
+        self.b_cell = (bx, by, bz)            # already redirected to the feed cell
         self.length = abs(bx - ax) + abs(bz - az)
-        if body:
-            last = self.b_cell
-            body[last] = _rep(zfacing)
 
         if not body:                       # endpoints adjacent: nothing to lay
             self.blocks = {}
