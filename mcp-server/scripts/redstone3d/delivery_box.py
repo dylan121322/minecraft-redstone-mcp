@@ -247,8 +247,12 @@ class TowerBox:
         # `in` is a west-facing REPEATER, not dust: a bare dust input couples to
         # whatever sits beside it, so a drive=0 from the connector still read 13
         # (its support block was energised). A repeater reads only its west side,
-        # so the input is isolated — the same design as the gate pins.
+        # so the input is isolated — the same design as the gate pins. Its output
+        # lands one cell EAST at the same height, which must be dust so the tower
+        # below it actually sees the signal (without the landing it drove air).
         body[(ax, ay, az)] = "minecraft:repeater[facing=west,delay=1]"
+        body[(ax + 1, ay, az)] = W
+        body[(ax + 1, ay - 1, az)] = S
         if (top - (ay - H)) % 2:
             body[(ax, top - 1, az)] = W
             body[(ax, top - 2, az)] = S
@@ -312,6 +316,18 @@ class TowerBox:
         self.blocks.update(shell)
         self.blocks.update(body)
         self.extent = ((x0 - 1, y0 - 1, z0 - 1), (x1 + 1, y1 + 1, z1 + 1))
+
+    def interior(self):
+        """The module WITHOUT its shell: every conducting cell plus the support
+        directly under it."""
+        out = {}
+        for p, b in self.blocks.items():
+            if b != S:
+                out[p] = b
+                below = (p[0], p[1] - 1, p[2])
+                if below in self.blocks and self.blocks[below] == S:
+                    out[below] = S
+        return out
 
     def cells(self):
         (x0, _y0, z0), (x1, _y1, z1) = self.extent
