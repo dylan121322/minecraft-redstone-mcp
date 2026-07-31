@@ -526,7 +526,13 @@ class BuildableRouter:
         # (n13 routed 241 cells with only the y0 refreshes and read 0 at both
         # sinks). facing = FLOW_FACING[travel] (a repeater reads the side it
         # faces; verified in test_rep_facing).
-        run = 0
+        # Start the run counter near the refresh threshold so the FIRST straight
+        # cell of this cross segment gets a repeater. A later sink's cross path
+        # branches off an existing trunk whose signal is already attenuated
+        # (n13: the trunk was down to 4 where the second branch began, and the
+        # next refresh sat 13 cells further on, so that branch died). Re-driving
+        # at the branch point makes every segment start from 15.
+        run = MAX_RUN - 2
         for i, (x, z) in enumerate(path):
             if (x, z) in climbed[net]:
                 continue
