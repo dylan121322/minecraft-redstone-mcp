@@ -219,18 +219,18 @@ class TowerBox:
             body[(x, y, z)] = b
         # the tower's own output dust sits in the shaft column at y_bot
         tower_out_x = ax
-        # dust lead (so the inverter's input block is fed by dust only), then the
-        # inverter, whose output is this module's `out`
+        # NO compensating inverter. Measured both ways: the shaft alone, driven at
+        # its top the way a trunk drives it, is NON-inverting (sealed test S2), and
+        # adding an inverter made the module inverting (drive1 -> 0). The earlier
+        # "the tower always inverts" reading came from probing the shaft's bottom
+        # cell, which is shared with the outgoing run and therefore reads whatever
+        # the downstream layout imposes.
         lead_from = max(x for (x, y, _z, _b) in cells if y == y_bot) + 1
         for i in range(2):
             body[(lead_from + i, y_bot, az)] = W
             body[(lead_from + i, y_bot - 1, az)] = S
-        icells, iout = inverter_cells(lead_from + 1, y_bot, az, direction=(1, 0))
-        for (x, y, z, b) in icells:
-            body[(x, y, z)] = b
-            body[(x, y - 1, z)] = S
         self.in_cell = (ax, ay, az)
-        self.out_cell = iout
+        self.out_cell = (lead_from + 1, y_bot, az)
 
         xs = [p[0] for p in body]; ys = [p[1] for p in body]; zs = [p[2] for p in body]
         x0, x1 = min(xs), max(xs)

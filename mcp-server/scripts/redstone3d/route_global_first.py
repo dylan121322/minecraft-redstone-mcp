@@ -75,6 +75,9 @@ class GlobalFirstRouter:
         # (x,z) -> net for every column a DeliveryBox occupies; boxes are
         # shielded, so they only need to not overlap each other.
         self.box_cols: Dict[XZ, str] = {}
+        # net -> its OWN trunk Y. Sharing one plane let a net's leg cross
+        # another net's trunk row; separate layers remove that entirely.
+        self.net_trunk_y: Dict[str, int] = {}
         self.pin_xz: Dict[XZ, str] = {}
         for n, p in placement.net_sources.items():
             self.pin_xz[(p[0], p[2])] = n
@@ -117,7 +120,10 @@ class GlobalFirstRouter:
             xs = [self.pl.net_sources[n][0]] + [k[0] for k in self.pl.net_sinks[n]]
             return max(xs) - min(xs)
 
-        for n in sorted(glob, key=span, reverse=True):
+        for i, n in enumerate(sorted(glob, key=span, reverse=True)):
+            # own layer: base+1, base+5, base+9, ... (4k+1 keeps the source UP
+            # tower's torch count even, i.e. non-inverting)
+            self.net_trunk_y[n] = self.base_y + 1 + 4 * i
             row = free_rows.pop(0) if free_rows else None
             if row is None:
                 res.failed.append(n)
@@ -129,6 +135,7 @@ class GlobalFirstRouter:
         return res
 
     def _one_global(self, net: str, row: int, res: GlobalResult) -> bool:
+        ty = self.net_trunk_y[net]          # this net's own trunk layer
         """Source UP tower -> trunk on `row` -> DOWN tower into each sink."""
         src = self.pl.net_sources[net]
         sinks = self.pl.net_sinks[net]
@@ -141,7 +148,7 @@ class GlobalFirstRouter:
             return False
         # drive: repeater at the source pin's east, reading the pin
         put((tx, self.base_y, sz), "minecraft:repeater[facing=west,delay=1]")
-        up, _foot = up_tower_cells(tx + 1, sz, self.base_y, self.trunk_y - 1)
+        up, _foot = up_tower_cells(tx + 1, sz, self.base_y, ty - 1)
         for (x, y, z, b) in up:
             put((x, y, z), b)
         top_x = tx + 1
@@ -151,7 +158,7 @@ class GlobalFirstRouter:
         # This leg needs refresh repeaters exactly like the row does: the rows sit
         # beyond the field (z > z1), so the leg can be tens of cells long and an
         # unrefreshed dust run dies after 15 (measured: a 45-cell leg delivered 0).
-        self._leg(put, top_x, sz, row, res)
+        self._leg(put, top_x, sz, row, res, ty=ty)
         res.reserved.add((top_x, row))
 
         # ---- trunk row spanning every sink column
@@ -164,7 +171,7 @@ class GlobalFirstRouter:
         # source (the placer's topological columns make data flow west->east), so
         # a single eastward trunk is sufficient.
         x_hi = max([top_x] + [k[0] - 9 for k in sinks])
-        tr, _ = trunk_cells(row, top_x, x_hi, self.trunk_y)
+        tr, _ = trunk_cells(row, top_x, x_hi, ty)
         for (x, y, z, b) in tr:
             put((x, y, z), b)
 
@@ -189,7 +196,7 @@ class GlobalFirstRouter:
             # The router's only remaining job here is packing.
             box = None
             for gap in (2, 3, 4, 5, 6):
-                cand, _kind = delivery_for_sink((k[0], k[2]), self.trunk_y,
+                cand, _kind = delivery_for_sink((k[0], k[2]), ty,
                                                 self.base_y, gap=gap)
                 cols = cand.cells()
                 if any(c in self.cell_xz or c in self.pin_xz for c in cols):
@@ -203,7 +210,7 @@ class GlobalFirstRouter:
 
             # bring the trunk to the box's `in` cell, then emit the box
             ix, iy, iz = box.in_cell
-            self._leg(put, ix, row, iz, res)
+            self._leg(put, ix, row, iz, res, ty=ty)
             for (bx, by, bz), bb in box.blocks.items():
                 put((bx, by, bz), bb)
             res.rmap.reserve(reservation_from_cells(
@@ -222,14 +229,15 @@ class GlobalFirstRouter:
         res.wire_count = sum(1 for b in res.blocks.values() if b == W)
         return True
 
-    def _leg(self, put, x, z_from, z_to, res, refresh=12):
+    def _leg(self, put, x, z_from, z_to, res, refresh=12, ty=None):
         """A z-direction run on the trunk plane at column `x`, with a refresh
         repeater every `refresh` cells. Travel +z needs facing=north and -z needs
         facing=south (a repeater reads the side it faces — verified in
         test_rep_facing). Straight line, so the orientation is unambiguous."""
+        ty = self.trunk_y if ty is None else ty
         if z_from == z_to:
-            put((x, self.trunk_y - 1, z_from), S)
-            put((x, self.trunk_y, z_from), W)
+            put((x, ty - 1, z_from), S)
+            put((x, ty, z_from), W)
             res.reserved.add((x, z_from))
             return
         step = 1 if z_to > z_from else -1
@@ -241,14 +249,14 @@ class GlobalFirstRouter:
         run = refresh
         z = z_from
         while True:
-            put((x, self.trunk_y - 1, z), S)
+            put((x, ty - 1, z), S)
             run += 1
             if run >= refresh and z != z_to and z != z_from:
-                put((x, self.trunk_y, z),
+                put((x, ty, z),
                     f"minecraft:repeater[facing={facing},delay=1]")
                 run = 0
             else:
-                put((x, self.trunk_y, z), W)
+                put((x, ty, z), W)
             res.reserved.add((x, z))
             if z == z_to:
                 break
