@@ -69,7 +69,14 @@ class Connector:
         # --- leg along x, from just after a_out toward b's column
         xstep = 1 if bx >= ax else -1
         xfacing = "west" if xstep == 1 else "east"     # travel +x reads west
-        run = 0
+        # The upstream out arrives already attenuated (measured: 10), and the
+        # first 12 cells would exhaust it before any refresh fired. Starting the
+        # counter at the threshold re-drives on the FIRST cell instead — the same
+        # fix that saved TrunkBox's corner. The LAST cell must also be a repeater:
+        # a downstream module's input torch defaults ON, and only a repeater
+        # output (strong) can force it off when the source is 0 — weak dust cannot
+        # (measured: the tower box read 13 with the source off).
+        run = REFRESH
         x = ax
         while x != bx:
             x += xstep
@@ -95,9 +102,16 @@ class Connector:
             else:
                 body[(bx, y, z)] = W
 
+        # The final cell is a REPEATER so the connector ends with a strong drive.
+        # A weak 0 cannot switch a downstream input torch OFF, which left tower
+        # deliveries reading a constant 13-14 (default-lit torch) with the source
+        # cut. The repeater's output is the connector's b_cell.
         self.a_cell = self.a_out
         self.b_cell = self.b_in
         self.length = abs(bx - ax) + abs(bz - az)
+        if body:
+            last = self.b_cell
+            body[last] = _rep(zfacing)
 
         if not body:                       # endpoints adjacent: nothing to lay
             self.blocks = {}
@@ -106,14 +120,33 @@ class Connector:
 
         # --- skin, then open both endpoints on every side
         shell: Dict[Pos, str] = {}
+        # Skin the axis neighbours EXCEPT the cell that a descending dust's
+        # see-below step looks into. Measured: A(5,2)->B(6,1) conducts only when
+        # the diagonal cell (6,2) is AIR; a skin that fills it seals the staircase
+        # mid-way (the box delivered 11 at one step, 0 at the next). Any cell that
+        # sits above-east (or above-west, above-south, above-north) of a LOWER dust
+        # must be left open, because it is exactly what a higher dust sees across.
+        # For every pair (upper dust at u, lower dust at l = u + (dx,-1,dz)),
+        # the see-below step needs the cell directly ABOVE l — i.e. (u.x+dx, u.y, u.z)
+        # — to stay AIR. It is exactly where the diagonal look crosses, and a skin
+        # block there seals the staircase (measured: A(5,2)->B(6,1) conducts only
+        # with (6,2) empty).
+        dusts = set((cx, cy, cz) for (cx, cy, cz), b in body.items() if b == W)
+        blocked_diag = set()
+        for (ux, uy, uz) in dusts:
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                lx, ly, lz = ux + dx, uy - 1, uz + dz
+                if (lx, ly, lz) in dusts:
+                    blocked_diag.add((lx, uy, lz))   # above the lower dust
         for (cx, cy, cz) in body:
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for dz in (-1, 0, 1):
-                        q = (cx + dx, cy + dy, cz + dz)
-                        if q in body:
-                            continue
-                        shell.setdefault(q, S)
+            for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                               (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                q = (cx + dx, cy + dy, cz + dz)
+                if q in body:
+                    continue
+                if q in blocked_diag:
+                    continue
+                shell.setdefault(q, S)
         for cell in (self.a_cell, self.b_cell):
             for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
                                (0, -1, 0), (0, 0, 1), (0, 0, -1)):

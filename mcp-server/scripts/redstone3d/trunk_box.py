@@ -131,14 +131,33 @@ class TrunkBox:
         # appeared to "finish with no output". Skinning only the real neighbours
         # keeps the block count proportional to the wiring.
         shell: Dict[Pos, str] = {}
+        # Skin the axis neighbours EXCEPT the cell that a descending dust's
+        # see-below step looks into. Measured: A(5,2)->B(6,1) conducts only when
+        # the diagonal cell (6,2) is AIR; a skin that fills it seals the staircase
+        # mid-way (the box delivered 11 at one step, 0 at the next). Any cell that
+        # sits above-east (or above-west, above-south, above-north) of a LOWER dust
+        # must be left open, because it is exactly what a higher dust sees across.
+        # For every pair (upper dust at u, lower dust at l = u + (dx,-1,dz)),
+        # the see-below step needs the cell directly ABOVE l — i.e. (u.x+dx, u.y, u.z)
+        # — to stay AIR. It is exactly where the diagonal look crosses, and a skin
+        # block there seals the staircase (measured: A(5,2)->B(6,1) conducts only
+        # with (6,2) empty).
+        dusts = set((cx, cy, cz) for (cx, cy, cz), b in body.items() if b == W)
+        blocked_diag = set()
+        for (ux, uy, uz) in dusts:
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                lx, ly, lz = ux + dx, uy - 1, uz + dz
+                if (lx, ly, lz) in dusts:
+                    blocked_diag.add((lx, uy, lz))   # above the lower dust
         for (cx, cy, cz) in body:
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for dz in (-1, 0, 1):
-                        q = (cx + dx, cy + dy, cz + dz)
-                        if q in body:
-                            continue
-                        shell.setdefault(q, S)
+            for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                               (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                q = (cx + dx, cy + dy, cz + dz)
+                if q in body:
+                    continue
+                if q in blocked_diag:
+                    continue
+                shell.setdefault(q, S)
         # Clear every neighbour of the two interface cells. With a skin-tight shell
         # the interface is wrapped on all sides, so listing a couple of openings (as
         # the filled-box version could afford to) sealed the very boundary the next

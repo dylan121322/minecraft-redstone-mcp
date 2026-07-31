@@ -123,14 +123,33 @@ class DeliveryBox:
         # grows with the module's LENGTH, which for the long modules meant tens of
         # thousands of stone blocks and an out-of-memory crash in MCHPRS.
         shell = {}
+        # Skin the axis neighbours EXCEPT the cell that a descending dust's
+        # see-below step looks into. Measured: A(5,2)->B(6,1) conducts only when
+        # the diagonal cell (6,2) is AIR; a skin that fills it seals the staircase
+        # mid-way (the box delivered 11 at one step, 0 at the next). Any cell that
+        # sits above-east (or above-west, above-south, above-north) of a LOWER dust
+        # must be left open, because it is exactly what a higher dust sees across.
+        # For every pair (upper dust at u, lower dust at l = u + (dx,-1,dz)),
+        # the see-below step needs the cell directly ABOVE l — i.e. (u.x+dx, u.y, u.z)
+        # — to stay AIR. It is exactly where the diagonal look crosses, and a skin
+        # block there seals the staircase (measured: A(5,2)->B(6,1) conducts only
+        # with (6,2) empty).
+        dusts = set((cx, cy, cz) for (cx, cy, cz), b in body.items() if b == W)
+        blocked_diag = set()
+        for (ux, uy, uz) in dusts:
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                lx, ly, lz = ux + dx, uy - 1, uz + dz
+                if (lx, ly, lz) in dusts:
+                    blocked_diag.add((lx, uy, lz))   # above the lower dust
         for (cx, cy, cz) in body:
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for dz in (-1, 0, 1):
-                        q = (cx + dx, cy + dy, cz + dz)
-                        if q in body:
-                            continue
-                        shell.setdefault(q, S)
+            for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                               (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                q = (cx + dx, cy + dy, cz + dz)
+                if q in body:
+                    continue
+                if q in blocked_diag:
+                    continue
+                shell.setdefault(q, S)
         # Open the interface faces. The trunk reaches the box along Z (it runs on a
         # row beyond the field and drops down the box's column), so the `in` face
         # must be open on BOTH z sides as well as the west — closing them made the
@@ -210,11 +229,18 @@ class TowerBox:
 
         # the tower needs an even span; step down one plain level when it is odd
         top = ay
-        body[(ax, ay, az)] = W
         if (top - (ay - H)) % 2:
             body[(ax, top - 1, az)] = W
             body[(ax, top - 2, az)] = S
             top -= 1
+        # STRONG DRIVE into the tower. A floating shaft top leaves the first torch
+        # lit (default-on), so the tower read a constant 13-14 with the source cut.
+        # Feed `in` into a repeater whose output lands one cell EAST, at (ax+1, top),
+        # and hand THAT to the shaft by starting the tower one cell over.
+        body[(ax + 1, top - 1, az)] = S
+        body[(ax + 1, top, az)] = "minecraft:repeater[facing=west,delay=1]"
+        ax += 1                                  # shaft shifts east by one
+        body[(ax, top, az)] = W                  # the driven dust the shaft reads
         y_bot = ay - H
         cells, _foot = down_tower_cells_dir(ax, az, top, y_bot,
                                             side=(1, 0), arm=(0, 1))
@@ -243,14 +269,33 @@ class TowerBox:
         # grows with the module's LENGTH, which for the long modules meant tens of
         # thousands of stone blocks and an out-of-memory crash in MCHPRS.
         shell = {}
+        # Skin the axis neighbours EXCEPT the cell that a descending dust's
+        # see-below step looks into. Measured: A(5,2)->B(6,1) conducts only when
+        # the diagonal cell (6,2) is AIR; a skin that fills it seals the staircase
+        # mid-way (the box delivered 11 at one step, 0 at the next). Any cell that
+        # sits above-east (or above-west, above-south, above-north) of a LOWER dust
+        # must be left open, because it is exactly what a higher dust sees across.
+        # For every pair (upper dust at u, lower dust at l = u + (dx,-1,dz)),
+        # the see-below step needs the cell directly ABOVE l — i.e. (u.x+dx, u.y, u.z)
+        # — to stay AIR. It is exactly where the diagonal look crosses, and a skin
+        # block there seals the staircase (measured: A(5,2)->B(6,1) conducts only
+        # with (6,2) empty).
+        dusts = set((cx, cy, cz) for (cx, cy, cz), b in body.items() if b == W)
+        blocked_diag = set()
+        for (ux, uy, uz) in dusts:
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                lx, ly, lz = ux + dx, uy - 1, uz + dz
+                if (lx, ly, lz) in dusts:
+                    blocked_diag.add((lx, uy, lz))   # above the lower dust
         for (cx, cy, cz) in body:
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for dz in (-1, 0, 1):
-                        q = (cx + dx, cy + dy, cz + dz)
-                        if q in body:
-                            continue
-                        shell.setdefault(q, S)
+            for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                               (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                q = (cx + dx, cy + dy, cz + dz)
+                if q in body:
+                    continue
+                if q in blocked_diag:
+                    continue
+                shell.setdefault(q, S)
         ic, oc = self.in_cell, self.out_cell
         for cell in (ic, oc):
             for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
