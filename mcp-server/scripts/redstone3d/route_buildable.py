@@ -52,6 +52,9 @@ class BuildResult:
     failed: List[str]
     wire_owner: Dict[Pos, str] = field(default_factory=dict)
     torches: List[Pos] = field(default_factory=list)
+    # wall torches carry an explicit blockstate: the 2x2 down-tower rungs need a
+    # specific facing, unlike the plain standing torches of the 1x1 up tower.
+    wall_torches: List[Tuple[Pos, str]] = field(default_factory=list)
 
     def total_wires(self) -> int:
         return sum(len(w) for w in self.wires.values())
@@ -81,6 +84,13 @@ class BuildableRouter:
         # is indexed by cross-Y then xz. net_cross_y maps a net to its layer.
         self.owner_cross: Dict[int, Dict[XZ, str]] = {}
         self.net_cross_y: Dict[str, int] = {}
+        # TRUE 3-D occupancy of every conducting voxel (dust/repeater/torch) the
+        # router places, keyed by (x, y, z). The per-plane tables above only track
+        # (x, z) on one layer each, which cannot describe a vertical gadget: a
+        # tower's intermediate rungs went unregistered, so neighbouring nets were
+        # free to place wires right against them (that was the 4 shorts). Any new
+        # three-dimensional gadget registers here and is checked here.
+        self.owner3d: Dict[Pos, str] = {}
         # negotiated-congestion history: per-cell penalty accumulated across
         # rip-up rounds. A cell that hosted a short in a prior round gets a
         # higher cost, so nets negotiate away from contested cells over rounds.
@@ -94,6 +104,39 @@ class BuildableRouter:
             if o is not None and o != net:
                 return True
         return False
+
+    # ---------- generic 3-D occupancy (works for any volumetric gadget) --------
+    # Real redstone coupling, matching _count_shorts: same-layer 8-neighbourhood
+    # plus the cells directly above and below. A full 26-cell shell also rejected
+    # diagonal-across-layers pairs, which are actually isolated (verified in
+    # CHANNEL_SPEC), and that over-strictness made the down tower unplaceable
+    # almost everywhere (7 fits vs 48 rejections).
+    _SHELL3D = [(dx, 0, dz) for dx in (-1, 0, 1) for dz in (-1, 0, 1)
+                if (dx, dz) != (0, 0)] + [(0, 1, 0), (0, -1, 0)]
+
+    def _claim3d(self, voxels, net: str) -> None:
+        """Register conducting voxels as owned by `net`."""
+        for v in voxels:
+            self.owner3d[v] = net
+
+    def _free3d(self, voxels, net: str) -> bool:
+        """True if every voxel is unowned (or ours) AND no FOREIGN conducting
+        voxel sits in its 26-neighbour shell. This is the general test a
+        three-dimensional gadget needs; the flat per-layer checks miss vertical
+        adjacency entirely."""
+        vs = set(voxels)
+        for v in vs:
+            o = self.owner3d.get(v)
+            if o is not None and o != net:
+                return False
+            for dx, dy, dz in self._SHELL3D:
+                q = (v[0] + dx, v[1] + dy, v[2] + dz)
+                if q in vs:
+                    continue
+                o = self.owner3d.get(q)
+                if o is not None and o != net:
+                    return False
+        return True
 
     def _foreign_pin_adj(self, xz: XZ, net: str, goal: XZ) -> bool:
         """True if xz sits in the 8-neighbourhood of a FOREIGN pin. Pins are
@@ -218,7 +261,7 @@ class BuildableRouter:
         # fresh occupancy each round (rip-up everything)
         self.owner0 = {}; self.owner2 = {}; self.support1 = {}
         self.owner_cross = {}; self.net_cross_y = {}
-        self.net_paths = {}
+        self.net_paths = {}; self.owner3d = {}
         placements: Dict[str, List[tuple]] = {n: [] for n in nets}
         need_bridge: List[Tuple[str, XZ]] = []
         y0 = self.base_y
@@ -254,6 +297,7 @@ class BuildableRouter:
                 self.net_paths.setdefault(net, []).append(list(path))
                 for (x, z) in path:
                     self.owner0[(x, z)] = net
+                    self.owner3d[(x, y0, z)] = net
                     if (x, z) not in self.pin_net:
                         tree.add((x, z))
                         placements[net].append(("dust", x, y0, z))
@@ -521,6 +565,42 @@ class BuildableRouter:
         # Only WEST-side descents: the pin is a west-facing repeater, so the
         # signal must arrive at (gx-1, gz). Landing east of the pin (the old "E"
         # candidates) can never feed it.
+        # FIRST CHOICE: the 2x2 DOWN TOWER (via_gadget.down_tower_cells_dir,
+        # verified in test_tower_bidir / test_down_dirs — non-inverting, full
+        # strength at the bottom, four usable rotations). Its footprint does not
+        # grow with the drop, unlike a staircase, so it fits where a corridor
+        # cannot. Occupancy is registered in the general 3-D table so neighbouring
+        # nets keep clear of the rungs. If no rotation fits we fall back to the
+        # staircase search below, which keeps every net that already routed.
+        # The tower is tried as a FALLBACK, after the staircase search below —
+        # measured: giving it priority made things worse (8 unrouted vs 5). Its
+        # footprint is small in Y but claims four (x,z) columns around the feed
+        # cell, whereas a staircase claims a single row; in this placement a free
+        # row turns out easier to find than a free 2x2. Keeping the tower as the
+        # fallback is monotone: every net the staircase could route still routes,
+        # and nets it cannot may still get a tower.
+        dt = None
+        if dt is not None:
+            rot, y_from, pre, cells, foot, cond = dt
+            path = self._y2_bfs(set(climbed[net]), (gx - 1, gz), net, cy_cross)
+            if path is not None:
+                self._lay_cross(net, path, cy_cross, climbed, p)
+                p += pre
+                for (x, y, z, b) in cells:
+                    if b == "minecraft:redstone_wire":
+                        p.append(("dust", x, y, z))
+                    elif "torch" in b:
+                        p.append(("wtorch", x, y, z, b))
+                    else:
+                        p.append(("block", x, y, z))
+                p.append(("dust", gx - 1, y0, gz))
+                self._claim3d(cond, net)
+                for c in foot:
+                    self.owner0.setdefault(c, net)
+                    self.support1[c] = net
+                self.owner0[(gx - 1, gz)] = net
+                return p
+
         cand = [("W", dz) for dz in (0, 1, -1, 2, -2)]
         chosen = None
         for (side, dz) in cand:
@@ -550,7 +630,32 @@ class BuildableRouter:
             chosen = (side, zz, cells, jog)
             break
         if chosen is None:
-            return None
+            # No staircase corridor fits — fall back to the 2x2 DOWN TOWER, whose
+            # footprint does not grow with the drop (via_gadget, verified in
+            # test_tower_bidir / test_down_dirs). This only ADDS reach.
+            dt = self._pick_down_tower(net, (gx, gz), cy_cross)
+            if dt is None:
+                return None
+            rot, y_from, pre, dcells, foot, cond = dt
+            path = self._y2_bfs(set(climbed[net]), (gx - 1, gz), net, cy_cross)
+            if path is None:
+                return None
+            self._lay_cross(net, path, cy_cross, climbed, p)
+            p += pre
+            for (x, y, z, b) in dcells:
+                if b == "minecraft:redstone_wire":
+                    p.append(("dust", x, y, z))
+                elif "torch" in b:
+                    p.append(("wtorch", x, y, z, b))
+                else:
+                    p.append(("block", x, y, z))
+            p.append(("dust", gx - 1, y0, gz))
+            self._claim3d(cond, net)
+            for c in foot:
+                self.owner0.setdefault(c, net)
+                self.support1[c] = net
+            self.owner0[(gx - 1, gz)] = net
+            return p
         side, zz, cells, jog = chosen
         cross_top = (cells[0][0] - (1 if side == "W" else -1), zz)
         path = self._y2_bfs(set(climbed[net]), cross_top, net, cy_cross)
@@ -622,6 +727,76 @@ class BuildableRouter:
             p.append(("dust", jx, y0, jz))
             self.owner0[(jx, jz)] = net
         return p
+
+    def _lay_cross(self, net, path, cy_cross, climbed, p):
+        """Emit a cross-plane run with refresh repeaters, registering both the
+        per-layer and the 3-D occupancy. Shared by the down-tower delivery and the
+        staircase delivery so both stay consistent."""
+        oc = self.owner_cross.setdefault(cy_cross, {})
+        run = MAX_RUN - 2
+        for i, (x, z) in enumerate(path):
+            if (x, z) in climbed[net]:
+                continue
+            run += 1
+            placed_rep = False
+            if run >= MAX_RUN - 1 and 0 < i < len(path) - 1:
+                prevc = path[i-1]; nextc = path[i+1]
+                came = (x - prevc[0], z - prevc[1])
+                leave = (nextc[0] - x, nextc[1] - z)
+                f = FLOW_FACING.get(came)
+                if f and came == leave:
+                    p.append(("support", x, cy_cross, z))
+                    p.append(("rep", x, cy_cross+1, z, f))
+                    placed_rep = True
+                    run = 0
+            if not placed_rep:
+                p.append(("support", x, cy_cross, z))
+                p.append(("dust", x, cy_cross+1, z))
+            oc[(x, z)] = net
+            self.support1[(x, z)] = net
+            self.owner3d[(x, cy_cross+1, z)] = net
+            climbed[net].add((x, z))
+
+    def _pick_down_tower(self, net, pin_xz, cy_cross):
+        """Choose a 2x2 DOWN-tower rotation that fits in the pin's west feed
+        column. Pure selection + legality (no emission), so it stays reusable:
+        the voxels come from via_gadget and legality is the generic 3-D check,
+        nothing module-specific. Returns
+        (rot, y_from, pre, cells, foot, conducting_voxels) or None."""
+        from via_gadget import down_tower_cells_dir
+        y0 = self.base_y
+        gx, gz = pin_xz
+        feed = (gx - 1, gz)
+        if feed in self.cell_xz or feed in self.pin_net:
+            return None
+        # cross dust sits at cy_cross+1 (odd offset from y0) while the tower needs
+        # an EVEN span for an even torch count; drop one plain see-below level
+        # first when the parity demands it.
+        y_from = cy_cross + 1
+        pre = []
+        if (y_from - y0) % 2:
+            pre = [("block", feed[0], y_from - 2, feed[1]),
+                   ("dust", feed[0], y_from - 1, feed[1])]
+            y_from -= 1
+        if y_from <= y0:
+            return None
+        for arm, side in (((1, 0), (0, 1)), ((1, 0), (0, -1)),
+                          ((0, 1), (1, 0)), ((0, -1), (1, 0))):
+            cells, foot = down_tower_cells_dir(feed[0], feed[1], y_from, y0,
+                                               side=side, arm=arm)
+            if any(c in self.cell_xz or c in self.pin_net for c in foot):
+                continue
+            DUST = "minecraft:redstone_wire"
+            cond = [(x, y, z) for (x, y, z, b) in cells
+                    if b == DUST or "torch" in b]
+            cond.append((feed[0], y0, feed[1]))
+            cond += [(q[1], q[2], q[3]) for q in pre if q[0] == "dust"]
+            if not self._free3d(cond, net):
+                continue
+            if not self._y2_free(feed, net, cy_cross):
+                continue
+            return (arm, side), y_from, pre, cells, foot, cond
+        return None
 
     def _extend_toward(self, net, placements, goal_xz):
         """Push the net's y0 route as CLOSE to goal_xz as the plane allows, lay
@@ -766,7 +941,7 @@ class BuildableRouter:
         return False
 
     def _materialize(self, nets, placements, bridges):
-        res = BuildResult({}, set(), {}, dict(bridges), [], {}, [])
+        res = BuildResult({}, set(), {}, dict(bridges), [], {}, [], [])
         for net in nets:
             res.wires[net] = set()
             res.repeaters[net] = []
@@ -780,6 +955,8 @@ class BuildableRouter:
                     res.supports.add((pl[1], pl[2], pl[3]))
                 elif role == "torch":
                     res.torches.append((pl[1], pl[2], pl[3]))
+                elif role == "wtorch":
+                    res.wall_torches.append(((pl[1], pl[2], pl[3]), pl[4]))
             # repeater insertion on long flat dust runs (source-ordered)
             self._insert_repeaters(net, placements[net], res)
             for p in res.wires[net]:
