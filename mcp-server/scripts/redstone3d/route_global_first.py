@@ -1,0 +1,250 @@
+"""
+route_global_first.py — the global-first flow from PARTITION_PLAN v2.
+
+Order (deliberately the reverse of the old router):
+  P1  build every GLOBAL net as a dedicated trunk corridor on a cross layer,
+      with 1x1 UP towers at the source and 2x2 DOWN towers into each sink pin;
+  P2  reserve those columns so the plane router cannot walk into them;
+  P3  route LOCAL nets per zone on y0 with the existing planar router;
+  P4  merge and report.
+
+Why this order: measurement showed partitioning only rescues local nets
+(ALU_Control local 19->23, shorts 7->0) while most failures are global nets
+(ImmGen 27 of 41). Deciding the long connections first makes them a first-class
+constraint instead of leftovers, and the corridor discipline (one net per row,
+rows >=3 apart, refresh every 12 cells) makes them structurally short-free —
+verified end to end at 300 cells in test_trunk_e2e.
+"""
+from __future__ import annotations
+import sys, os, json, copy, time
+from dataclasses import dataclass, field
+from typing import Dict, List, Set, Tuple
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE)
+sys.path.insert(0, os.path.join(BASE, "..", "riscv_synth"))
+
+from via_gadget import up_tower_cells, trunk_cells, down_tower_cells_dir
+from route_buildable import BuildableRouter
+
+Pos = Tuple[int, int, int]
+XZ = Tuple[int, int]
+W = "minecraft:redstone_wire"; S = "minecraft:stone"
+
+TRACK_PITCH = 3          # measured minimum isolated corridor spacing
+LAYER_PITCH = 4          # Y between cross layers (keeps tower torch count even)
+
+
+@dataclass
+class GlobalResult:
+    blocks: Dict[Pos, str] = field(default_factory=dict)
+    reserved: Set[XZ] = field(default_factory=set)     # y0 columns consumed
+    routed: List[str] = field(default_factory=list)
+    failed: List[str] = field(default_factory=list)
+    trunk_rows: Dict[str, int] = field(default_factory=dict)
+    wire_count: int = 0
+
+
+class GlobalFirstRouter:
+    def __init__(self, placement, zone_width: int = 64, trunk_y: int = 9):
+        self.pl = placement
+        self.W = zone_width
+        mn, mx = placement.bounds
+        self.x0, self.x1 = mn[0], mx[0]
+        self.z0, self.z1 = mn[2], mx[2]
+        self.base_y = mn[1]
+        # trunk dust plane: an UP tower delivers at base+4k+1, so trunk_y must be
+        # base + 4k + 1 for a non-inverting climb.
+        self.trunk_y = trunk_y
+        self.cell_xz: Set[XZ] = {(p[0], p[2]) for p in placement.occupancy}
+        self.pin_xz: Dict[XZ, str] = {}
+        for n, p in placement.net_sources.items():
+            self.pin_xz[(p[0], p[2])] = n
+        for n, ks in placement.net_sinks.items():
+            for p in ks:
+                self.pin_xz[(p[0], p[2])] = n
+
+    # ---------- classification ----------
+    def _zone(self, x: int) -> int:
+        return (x - self.x0) // self.W
+
+    def classify(self):
+        nets = [n for n in self.pl.net_sinks
+                if self.pl.net_sources.get(n) and self.pl.net_sinks.get(n)]
+        local, glob = [], []
+        for n in nets:
+            xs = [self.pl.net_sources[n][0]] + [k[0] for k in self.pl.net_sinks[n]]
+            (local if len({self._zone(x) for x in xs}) == 1 else glob).append(n)
+        return nets, local, glob
+
+    # ---------- P1: global trunks ----------
+    def build_globals(self, glob: List[str]) -> GlobalResult:
+        res = GlobalResult()
+        free_rows = [z for z in range(self.z1 + TRACK_PITCH,
+                                      self.z1 + TRACK_PITCH * (len(glob) + 2),
+                                      TRACK_PITCH)]
+        # longest first: they gain most from a clean corridor
+        def span(n):
+            xs = [self.pl.net_sources[n][0]] + [k[0] for k in self.pl.net_sinks[n]]
+            return max(xs) - min(xs)
+
+        for n in sorted(glob, key=span, reverse=True):
+            row = free_rows.pop(0) if free_rows else None
+            if row is None:
+                res.failed.append(n)
+                continue
+            ok = self._one_global(n, row, res)
+            (res.routed if ok else res.failed).append(n)
+            if ok:
+                res.trunk_rows[n] = row
+        return res
+
+    def _one_global(self, net: str, row: int, res: GlobalResult) -> bool:
+        """Source UP tower -> trunk on `row` -> DOWN tower into each sink."""
+        src = self.pl.net_sources[net]
+        sinks = self.pl.net_sinks[net]
+        put = res.blocks.__setitem__
+
+        # ---- source: climb at a column just east of the source pin
+        sx, sz = src[0], src[2]
+        tx = sx + 1
+        if (tx, sz) in self.cell_xz or (tx, sz) in self.pin_xz:
+            return False
+        # drive: repeater at the source pin's east, reading the pin
+        put((tx, self.base_y, sz), "minecraft:repeater[facing=west,delay=1]")
+        up, _foot = up_tower_cells(tx + 1, sz, self.base_y, self.trunk_y - 1)
+        for (x, y, z, b) in up:
+            put((x, y, z), b)
+        top_x = tx + 1
+        res.reserved.update({(tx, sz), (top_x, sz)})
+
+        # ---- get from the tower's z to the trunk row, then run east/west
+        # vertical leg on the trunk plane (same layer, unique column) then the row
+        for z in range(min(sz, row), max(sz, row) + 1):
+            put((top_x, self.trunk_y - 1, z), S)
+            put((top_x, self.trunk_y, z), W)
+        res.reserved.add((top_x, row))
+
+        # ---- trunk row spanning every sink column
+        xs = [top_x] + [k[0] - 2 for k in sinks]
+        x_lo, x_hi = min(xs), max(xs)
+        tr, _ = trunk_cells(row, top_x, x_hi, self.trunk_y)
+        for (x, y, z, b) in tr:
+            put((x, y, z), b)
+        if x_lo < top_x:
+            tr2, _ = trunk_cells(row, top_x, x_lo, self.trunk_y)
+            for (x, y, z, b) in tr2:
+                put((x, y, z), b)
+
+        # ---- each sink: come off the row on its own column, drop into the pin
+        for k in sinks:
+            # The verified DOWN-tower rotations all place their partner column one
+            # step EAST of the shaft, and east of the feed cell is the pin itself,
+            # so the tower cannot land directly on the feed. Drop it one column
+            # further west and bridge east with a single y0 dust.
+            fx, fz = k[0] - 2, k[2]
+            feed_cell = (k[0] - 1, k[2])
+            if any(c in self.cell_xz or c in self.pin_xz
+                   for c in ((fx, fz), feed_cell)):
+                return False
+            # vertical leg on the trunk plane from the row to the sink's z
+            for z in range(min(fz, row), max(fz, row) + 1):
+                put((fx, self.trunk_y - 1, z), S)
+                put((fx, self.trunk_y, z), W)
+            # parity bridge then the 2x2 down tower
+            dn_from = self.trunk_y
+            if (dn_from - self.base_y) % 2:
+                put((fx, dn_from - 2, fz), S)
+                put((fx, dn_from - 1, fz), W)
+                dn_from -= 1
+            placed = False
+            # Rotations that reach AWAY from the pin come first: the feed cell sits
+            # immediately west of the pin, so an arm pointing east (+x) lands on
+            # the pin's own gate and every rotation gets rejected — that was why
+            # all 14 globals failed on the first run.
+            # Only the rotations proven in test_down_dirs are used (side=(1,0);
+            # arm=-x and side=-x variants measured non-functional).
+            for arm, side in (((0, 1), (1, 0)), ((0, -1), (1, 0)),
+                              ((1, 0), (0, 1)), ((1, 0), (0, -1))):
+                foot = {(fx, fz),
+                        (fx + arm[0], fz + arm[1]),
+                        (fx + side[0], fz + side[1]),
+                        (fx + arm[0] + side[0], fz + arm[1] + side[1])}
+                if any(c in self.cell_xz or c in self.pin_xz for c in foot):
+                    continue
+                dn, _ = down_tower_cells_dir(fx, fz, dn_from, self.base_y,
+                                             side=side, arm=arm)
+                for (x, y, z, b) in dn:
+                    put((x, y, z), b)
+                put((fx, self.base_y, fz), W)           # tower's bottom dust
+                put((feed_cell[0], self.base_y, feed_cell[1]), W)  # bridge east
+                res.reserved.update(foot | {feed_cell})
+                placed = True
+                break
+            if not placed:
+                return False
+        res.wire_count = sum(1 for b in res.blocks.values() if b == W)
+        return True
+
+    # ---------- P3: local nets, per zone, avoiding the reservations ----------
+    def route_locals(self, local: List[str], reserved: Set[XZ], rounds=2):
+        by_zone: Dict[int, List[str]] = {}
+        for n in local:
+            xs = [self.pl.net_sources[n][0]]
+            by_zone.setdefault(self._zone(xs[0]), []).append(n)
+        out = []
+        for z, nets in sorted(by_zone.items()):
+            sub = copy.copy(self.pl)
+            sub.net_sinks = {n: self.pl.net_sinks[n] for n in nets}
+            sub.net_sources = {n: self.pl.net_sources[n] for n in nets}
+            # the trunk columns are occupied ground for the plane router
+            sub.occupancy = set(self.pl.occupancy) | \
+                {(x, self.base_y, zz) for (x, zz) in reserved}
+            r = BuildableRouter(sub, margin=16)
+            rr = r.route(verbose=False, max_rounds=rounds)
+            sh, _ = r._count_shorts(rr)
+            out.append((z, nets, rr, sh))
+        return out
+
+    # ---------- driver ----------
+    def run(self, rounds=2, verbose=True):
+        t0 = time.time()
+        nets, local, glob = self.classify()
+        g = self.build_globals(glob)
+        zres = self.route_locals(local, g.reserved, rounds=rounds)
+        loc_ok = sum(len(nets) - len(rr.failed) for _z, nets, rr, _s in zres)
+        loc_short = sum(s for *_x, s in zres)
+        loc_wire = sum(rr.total_wires() for _z, _n, rr, _s in zres)
+        if verbose:
+            print(f"  global: {len(g.routed)}/{len(glob)} routed, "
+                  f"{len(g.blocks)} blocks, rows={len(g.trunk_rows)}")
+            print(f"  local : {loc_ok}/{len(local)} routed over {len(zres)} zones, "
+                  f"shorts={loc_short} wires={loc_wire}")
+        return {
+            "nets": len(nets), "local": len(local), "global": len(glob),
+            "global_routed": len(g.routed), "global_failed": g.failed[:8],
+            "local_routed": loc_ok, "local_shorts": loc_short,
+            "total_routed": len(g.routed) + loc_ok,
+            "global_blocks": len(g.blocks), "local_wires": loc_wire,
+            "secs": round(time.time() - t0, 1),
+        }, g, zres
+
+
+def main():
+    from placer import place
+    nls = json.load(open(os.path.join(BASE, "..", "riscv_synth", "netlists.json")))
+    mods = [a for a in sys.argv[1:] if not a.isdigit()] or ["alu1"]
+    zw = next((int(a) for a in sys.argv[1:] if a.isdigit()), 64)
+    for mod in mods:
+        pl = place(nls[mod], col_gap=16, row_gap=16)
+        r = GlobalFirstRouter(pl, zone_width=zw)
+        print(f"[{mod} W={zw}]")
+        rep, _g, _z = r.run()
+        print(f"  => total routed {rep['total_routed']}/{rep['nets']} "
+              f"(global {rep['global_routed']}/{rep['global']}, "
+              f"local {rep['local_routed']}/{rep['local']}) "
+              f"local_shorts={rep['local_shorts']} {rep['secs']}s")
+
+
+if __name__ == "__main__":
+    main()
