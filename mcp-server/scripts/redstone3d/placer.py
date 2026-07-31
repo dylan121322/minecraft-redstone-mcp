@@ -168,13 +168,35 @@ def place(netlist: dict, origin: Pos = (0, 0, 0),
     # Primary inputs: injection positions on the west edge, one z-row each
     # spread PIs apart in z (>=4) so their fan-out wires don't run adjacent as
     # they leave the west edge.
+    # Place each PI at the z of the gates it actually feeds (median of its sink
+    # rows) instead of a mechanical ladder down the west edge. Measured on alu1:
+    # the fixed ladder pushed PI n8 to z=96 while its consumer sat at z=19, and
+    # the eight longest connections — all of them the nets the router fails to
+    # route — accounted for 48% of total wire length. Anchoring a PI to its
+    # consumers removes that travel at the source.
     primary_inputs: Dict[str, Pos] = {}
-    pi_z = oz0
-    pi_step = max(4, row_gap)
-    for net in netlist.get("inputs", []):
-        primary_inputs[net] = (ox0, oy0, pi_z)
-        net_sources[net] = (ox0, oy0, pi_z)  # PI drives the net
-        pi_z += pi_step
+    used_z: Set[int] = set()
+    pi_min_sep = 4
+    def claim_z(want: int) -> int:
+        z = want
+        step = 0
+        while any(abs(z - u) < pi_min_sep for u in used_z):
+            step += 1
+            z = want + (step if step % 2 else -step) * pi_min_sep
+        used_z.add(z)
+        return z
+
+    pi_nets = list(netlist.get("inputs", []))
+    # order by consumer position so neighbouring PIs stay in consumer order
+    def pi_key(net):
+        zs = [p[2] for p in net_sinks.get(net, [])]
+        return sum(zs) / len(zs) if zs else 0.0
+    for net in sorted(pi_nets, key=pi_key):
+        zs = sorted(p[2] for p in net_sinks.get(net, []))
+        want = zs[len(zs) // 2] if zs else oz0
+        z = claim_z(want)
+        primary_inputs[net] = (ox0, oy0, z)
+        net_sources[net] = (ox0, oy0, z)  # PI drives the net
 
     # Primary outputs: read positions on the east edge
     primary_outputs: Dict[str, Pos] = {}
