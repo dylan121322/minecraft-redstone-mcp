@@ -46,9 +46,11 @@ class GlobalResult:
 
 
 class GlobalFirstRouter:
-    def __init__(self, placement, zone_width: int = 64, trunk_y: int = 9):
+    def __init__(self, placement, zone_width: int = 64, trunk_y: int = 9,
+                 zone_depth: int = 128):
         self.pl = placement
         self.W = zone_width
+        self.Wz = zone_depth        # z extent of a zone (see _zone)
         mn, mx = placement.bounds
         self.x0, self.x1 = mn[0], mx[0]
         self.z0, self.z1 = mn[2], mx[2]
@@ -65,16 +67,27 @@ class GlobalFirstRouter:
                 self.pin_xz[(p[0], p[2])] = n
 
     # ---------- classification ----------
-    def _zone(self, x: int) -> int:
-        return (x - self.x0) // self.W
+    # Zones are TWO-DIMENSIONAL. Splitting on x alone left every z-long connection
+    # classified as "local": Forwarding's field is 121 x 820, so 62 of its 84 local
+    # nets landed in a single zone and 30 of them could not be routed — all of them
+    # long (spans 110-750) with their sink feed cells still free, i.e. the plane was
+    # simply full. Cutting z as well spreads that load and promotes the long
+    # z-runs to globals, which get a verified corridor instead.
+    def _zone(self, x: int, z: int = None):
+        if z is None:                     # legacy single-arg use
+            return (x - self.x0) // self.W
+        return ((x - self.x0) // self.W, (z - self.z0) // self.Wz)
+
+    def _net_zones(self, n) -> Set:
+        pts = [self.pl.net_sources[n]] + list(self.pl.net_sinks[n])
+        return {self._zone(p[0], p[2]) for p in pts}
 
     def classify(self):
         nets = [n for n in self.pl.net_sinks
                 if self.pl.net_sources.get(n) and self.pl.net_sinks.get(n)]
         local, glob = [], []
         for n in nets:
-            xs = [self.pl.net_sources[n][0]] + [k[0] for k in self.pl.net_sinks[n]]
-            (local if len({self._zone(x) for x in xs}) == 1 else glob).append(n)
+            (local if len(self._net_zones(n)) == 1 else glob).append(n)
         return nets, local, glob
 
     # ---------- P1: global trunks ----------
@@ -188,10 +201,10 @@ class GlobalFirstRouter:
 
     # ---------- P3: local nets, per zone, avoiding the reservations ----------
     def route_locals(self, local: List[str], reserved: Set[XZ], rounds=2):
-        by_zone: Dict[int, List[str]] = {}
+        by_zone: Dict[tuple, List[str]] = {}
         for n in local:
-            xs = [self.pl.net_sources[n][0]]
-            by_zone.setdefault(self._zone(xs[0]), []).append(n)
+            s = self.pl.net_sources[n]
+            by_zone.setdefault(self._zone(s[0], s[2]), []).append(n)
         out = []
         for z, nets in sorted(by_zone.items()):
             sub = copy.copy(self.pl)
