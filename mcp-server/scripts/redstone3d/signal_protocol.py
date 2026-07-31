@@ -124,6 +124,18 @@ class Link:
         if out.kind is Kind.REPEATER_OUT and inp.kind is Kind.REPEATER_OUT:
             v.append(Violation(b, "repeater output driving a repeater output"))
 
+        # 5. a BLOCK carries power only if something STRONGLY powers it. Dust lying
+        #    next to a block does not energise it enough to switch a torch, so a
+        #    block input needs a repeater (or a torch) aimed at it. This dimension
+        #    was missing while the protocol still reported chains as valid that
+        #    MCHPRS measured dead: the declarations were honest, the rule set was
+        #    incomplete.
+        if inp.kind is Kind.BLOCK and out.kind not in (Kind.REPEATER_OUT,
+                                                       Kind.TORCH_OUT):
+            v.append(Violation(b, f"{down.name} input is a solid block but "
+                                  f"{up.name} ends in {out.kind.value}; a block "
+                                  f"needs a repeater or torch driving it"))
+
         return v
 
 
@@ -177,12 +189,31 @@ class Chain:
 
 def seg_up_tower(base_cell: Pos, top_y: int, torches: int) -> Segment:
     """1x1 standing-torch climb. Regenerates, so the output is full strength; each
-    torch inverts, so the polarity follows the parity of the torch count."""
+    torch inverts, so the polarity follows the parity of the torch count.
+
+    Its input is a solid BLOCK (block0), driven from the side by a repeater — not
+    dust. Declaring it as dust is what made the protocol pass chains that MCHPRS
+    then measured as dead; the honesty audit caught it on all eleven of them."""
     x, y, z = base_cell
     pol = Polarity.NORMAL if torches % 2 == 0 else Polarity.INVERTED
     return Segment("up_tower",
-                   Port(base_cell, y, Kind.DUST, 15),
+                   Port(base_cell, y, Kind.BLOCK, 15),
                    Port((x, top_y, z), top_y, Kind.DUST, 15, pol),
+                   needs_level=1)
+
+
+def seg_source_drive(pin_cell: Pos, rep_cell: Pos, block_cell: Pos) -> Segment:
+    """The source end: a gate output dust, a repeater reading it, and the repeater
+    driving the up tower's base block. Modelling this explicitly is what lets the
+    block-needs-a-strong-driver rule apply — without it the chain started at the
+    tower and the missing driver went unnoticed."""
+    # `out` names the cell that CARRIES this segment's signal — the repeater
+    # itself — not the block it energises. Pointing it at the block made the
+    # honesty audit (correctly) complain that the cell holds stone.
+    return Segment("source_drive",
+                   Port(pin_cell, pin_cell[1], Kind.DUST, 15),
+                   Port(rep_cell, rep_cell[1], Kind.REPEATER_OUT, 15,
+                        facing="west"),
                    needs_level=1)
 
 
@@ -211,10 +242,15 @@ def seg_stairs_box(in_cell: Pos, out_cell: Pos, drop: int) -> Segment:
     """Shielded staircase delivery: non-inverting, but loses one level per level
     dropped — which is exactly the fact the protocol needs in order to reject a
     deep drop instead of letting it fail silently in a world."""
+    # A staircase consumes one level per level dropped, so it does not merely need
+    # "some" signal — it needs more than its own depth, or it delivers zero. Stating
+    # that here is what lets the protocol reject a shallow feed into a deep box,
+    # which is precisely how the trunk+stairs chain failed (trunk delivered 8, the
+    # 5-deep box plus its boundary bridge ate all of it).
     return Segment("stairs_box",
                    Port(in_cell, in_cell[1], Kind.DUST, 15),
                    Port(out_cell, out_cell[1], Kind.DUST, max(0, 15 - drop)),
-                   needs_level=1)
+                   needs_level=drop + 2)
 
 
 def seg_tower_box(in_cell: Pos, out_cell: Pos, drop: int,

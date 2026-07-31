@@ -19,8 +19,9 @@ sys.path.insert(0, os.path.join(BASE, "..", "riscv_synth"))
 from placer import place
 from route_global_first import route_adaptive
 from delivery_box import delivery_for_sink
-from signal_protocol import (Chain, Polarity, seg_up_tower, seg_trunk, seg_leg,
-                             seg_stairs_box, seg_tower_box, seg_feed_run, seg_pin)
+from signal_protocol import (Chain, Polarity, seg_source_drive, seg_up_tower,
+                             seg_trunk, seg_leg, seg_stairs_box, seg_tower_box,
+                             seg_feed_run, seg_pin)
 
 
 def chain_for(net, pl, r, g, sink):
@@ -38,6 +39,9 @@ def chain_for(net, pl, r, g, sink):
     ox, oy, oz = box.out_cell
 
     c = Chain(f"{net}->({sink[0]},{sink[2]})")
+    # the router puts a west-facing repeater at sx+1 driving the tower base
+    c.add(seg_source_drive((sx, base, sz), (sx + 1, base, sz),
+                           (tower_x, base, sz)))
     c.add(seg_up_tower((tower_x, base, sz), ty, torches))
     c.add(seg_trunk((tower_x, ty, sz), (tower_x, ty, row), ty))
     c.add(seg_leg((tower_x, ty, row), (ix, ty, row), ty))

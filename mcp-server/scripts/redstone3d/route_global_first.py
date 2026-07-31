@@ -121,9 +121,13 @@ class GlobalFirstRouter:
             return max(xs) - min(xs)
 
         for i, n in enumerate(sorted(glob, key=span, reverse=True)):
-            # own layer: base+1, base+5, base+9, ... (4k+1 keeps the source UP
-            # tower's torch count even, i.e. non-inverting)
-            self.net_trunk_y[n] = self.base_y + 1 + 4 * i
+            # Own layer, starting at base+5 rather than base+1: the local routing
+            # puts its support blocks at base+1, so a trunk there shared a plane
+            # with them and picked up their signal — rule_mining measured the trunk
+            # sitting at a constant 8 while the tower feeding it swung 0->15.
+            # Layers stay 4k+1 so the source UP tower always climbs an even number
+            # of torches (non-inverting), and step by 4 to keep planes isolated.
+            self.net_trunk_y[n] = self.base_y + 5 + 4 * i
             row = free_rows.pop(0) if free_rows else None
             if row is None:
                 res.failed.append(n)
