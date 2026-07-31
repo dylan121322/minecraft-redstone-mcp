@@ -173,6 +173,20 @@ class TrunkBox:
         self.blocks.update(body)
         self.extent = ((x0 - 1, y0 - 1, z0 - 1), (x1 + 1, y1 + 1, z1 + 1))
 
+    def interior(self):
+        """The module WITHOUT its shell: every conducting cell plus the support
+        directly under it. The skin leaks charge between modules (stone conducts
+        when energised), so the non-box design removes it and isolates by air
+        gaps + reserved columns instead."""
+        out = {}
+        for p, b in self.blocks.items():
+            if b != S:
+                out[p] = b
+                below = (p[0], p[1] - 1, p[2])
+                if below in self.blocks and self.blocks[below] == S:
+                    out[below] = S
+        return out
+
     def cells(self):
         (x0, _y0, z0), (x1, _y1, z1) = self.extent
         return {(x, z) for x in range(x0, x1 + 1) for z in range(z0, z1 + 1)}
