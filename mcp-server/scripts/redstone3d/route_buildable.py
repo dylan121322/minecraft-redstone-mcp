@@ -250,22 +250,28 @@ class BuildableRouter:
         def xspan(n):
             xs = [self.pl.net_sources[n][0]] + [k[0] for k in self.pl.net_sinks[n]]
             return (min(xs), max(xs))
-        spans = {n: xspan(n) for n in bridge_nets}
-        def overlap(a, b):
-            la, ra = spans[a]; lb, rb = spans[b]
-            return not (ra < lb or rb < la)
-        order = sorted(bridge_nets, key=lambda n: spans[n][1] - spans[n][0], reverse=True)
-        color = {}
-        for n in order:
-            used = {color[m] for m in color if overlap(n, m)}
-            c = 1
-            while c in used:
-                c += 1
-            color[n] = c
+        # Cross layers are assigned ON DEMAND, lowest first: every bridged net
+        # tries y0+4 and only moves up when its cross route actually collides
+        # with a net already on that layer. Pre-colouring by x-span overlap was
+        # far too pessimistic (all long nets "overlap", so n2 landed on y17 —
+        # and since the descent staircase is as long as the layer is high, a deep
+        # layer forces a long cross run AND a long descent: the opposite of
+        # minimal. The router retries _bridge per layer, so correctness is kept.
         for net in bridge_nets:
-            self.net_cross_y[net] = y0 + 4 * color[net]
+            self.net_cross_y.setdefault(net, y0 + 4)
         for net, goal in sorted(need_bridge, key=lambda ng: ng[0]):
-            gadget = self._bridge(net, goal, placements, climbed)
+            # try the lowest cross layer first, stepping up (+4 Y each time, so
+            # the torch count stays even => non-inverting) only when this layer
+            # is genuinely blocked. Keeps hops shallow and short.
+            gadget = None
+            saved = self.net_cross_y.get(net, y0 + 4)
+            for attempt in range(6):
+                self.net_cross_y[net] = saved + 4 * attempt
+                gadget = self._bridge(net, goal, placements, climbed)
+                if gadget:
+                    break
+                # a failed attempt may have left this net's climb registered
+                climbed.pop(net, None)
             if gadget:
                 placements[net].extend(gadget)
                 bridges[net] += 1
@@ -395,11 +401,14 @@ class BuildableRouter:
 
         if net not in climbed:
             s = self.pl.net_sources[net]
-            sx, sz = s[0], s[2]
-            # find a tower foothold via a 2-D y0 BFS from the source: the nearest
-            # cell (any direction) whose repeater base is conflict-free, reached
-            # by a clear y0 lead. Single-row +x search failed when the source row
-            # was saturated (congested PI region). The lead follows the BFS path.
+            # MINIMAL HOP: start the climb from the point of the net's ALREADY
+            # ROUTED y0 tree that is closest to this sink, not from the source.
+            # Climbing at the source made the signal travel the whole way on the
+            # cross plane (n8: 133 cross cells for an 8-cell obstacle, n13: 216),
+            # which wastes space and multiplies the adjacency surface. The real
+            # blockage is only a few cells wide, so we hop just over it.
+            anchor = self._extend_toward(net, placements, goal_xz)
+            sx, sz = anchor if anchor else (s[0], s[2])
             foot = self._find_foothold(net, (sx, sz))
             if foot is None:
                 return None
@@ -546,6 +555,65 @@ class BuildableRouter:
             self.owner0[(jx, jz)] = net
         return p
 
+    def _extend_toward(self, net, placements, goal_xz):
+        """Push the net's y0 route as CLOSE to goal_xz as the plane allows, lay
+        that dust, and return the closest cell reached. The bridge then only has
+        to hop the residual gap (measured: n8's real blockage is 8 cells wide,
+        while climbing at the source made it fly 133 cells on the cross plane).
+        Returns None if nothing was reachable."""
+        y0 = self.base_y
+        tree = {(p[1], p[3]) for p in placements.get(net, [])
+                if p[0] == "dust" and p[2] == y0}
+        s = self.pl.net_sources[net]
+        tree.add((s[0], s[2]))
+        gx, gz = goal_xz
+        # Dijkstra-ish BFS over legal y0 cells, tracking the closest approach
+        prev = {}; seen = set(tree); q = deque(tree)
+        best = min(tree, key=lambda c: abs(c[0]-gx) + abs(c[1]-gz))
+        best_d = abs(best[0]-gx) + abs(best[1]-gz)
+        while q:
+            cur = q.popleft()
+            for dx, dz in _H:
+                nx = (cur[0]+dx, cur[1]+dz)
+                if nx in seen or not self._in_box(nx):
+                    continue
+                if nx in self.cell_xz or nx in self.pin_net:
+                    continue
+                o = self.owner0.get(nx)
+                if o is not None and o != net:
+                    continue
+                if self._foreign_plane(nx, net, self.owner0) or \
+                   self._foreign_pin_adj(nx, net, goal_xz):
+                    continue
+                seen.add(nx); prev[nx] = cur; q.append(nx)
+                d = abs(nx[0]-gx) + abs(nx[1]-gz)
+                if d < best_d:
+                    best_d = d; best = nx
+        if best in tree:
+            return best
+        # lay the dust along the path to `best`
+        path = [best]
+        while path[-1] in prev:
+            path.append(prev[path[-1]])
+        path.reverse()
+        for c in path:
+            if c in tree or c in self.pin_net:
+                continue
+            placements[net].append(("dust", c[0], y0, c[1]))
+            self.owner0[c] = net
+        return best
+
+    def _closest_routed_cell(self, net, placements, goal_xz):
+        """The net's already-placed y0 cell nearest to goal_xz (Manhattan). The
+        bridge climbs from there so the cross-plane detour spans only the local
+        obstacle instead of the whole source→sink distance."""
+        cells = [(p[1], p[3]) for p in placements.get(net, [])
+                 if p[0] == "dust" and p[2] == self.base_y]
+        if not cells:
+            return None
+        gx, gz = goal_xz
+        return min(cells, key=lambda c: abs(c[0]-gx) + abs(c[1]-gz))
+
     def _find_foothold(self, net, start):
         """2-D BFS on y0 from the source to the nearest cell where a tower can
         stand (repeater base conflict-free). Returns ((tx,tz), lead_path) where
@@ -566,7 +634,11 @@ class BuildableRouter:
             probe = cur
             while probe in prev:
                 probe = prev[probe]; hops += 1
-            if cur != start and hops >= 1 and not self._tower_conflict(cur, net):
+            # hops>=2 so that path = [source, lead.., tower] has at least one
+            # intermediate cell: lead = path[1:-1] must be non-empty to host the
+            # driving repeater. hops>=1 still allowed a tower directly beside the
+            # source (lead empty, block0 undriven, ladder dead).
+            if cur != start and hops >= 2 and not self._tower_conflict(cur, net):
                 # reconstruct lead (exclude source and foothold)
                 path = [cur]
                 while path[-1] in prev:
