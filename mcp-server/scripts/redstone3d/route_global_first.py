@@ -243,9 +243,60 @@ class GlobalFirstRouter:
         }, g, zres
 
 
+def route_adaptive(placement, rounds=2, verbose=False,
+                   grid=((96, 192), (64, 128), (48, 96), (32, 64),
+                         (24, 48), (16, 32), (12, 24))):
+    """Search zone granularity from COARSE to FINE and stop at the first setting
+    that routes every net with zero shorts.
+
+    Rationale from the diagnosis: every failure ever observed had the same cause —
+    a connection long enough to need a clear channel was classified `local` because
+    the zone was big enough to contain it, so it had to fight for a plane that was
+    already full. Global nets, which get a dedicated corridor, never failed (100%
+    in every module). Finer zones promote more nets to global and fix the failures;
+    coarser zones keep more nets on the cheap local plane and use less space.
+    Searching coarse->first-success therefore yields the SMALLEST layout that still
+    routes completely, instead of hard-coding one granularity per module.
+
+    Returns (report, router, global_result, zone_results).
+    """
+    best = None
+    for (W, Wz) in grid:
+        r = GlobalFirstRouter(placement, zone_width=W, zone_depth=Wz)
+        rep, g, zres = r.run(rounds=rounds, verbose=False)
+        rep["zone_width"], rep["zone_depth"] = W, Wz
+        complete = (rep["total_routed"] == rep["nets"] and rep["local_shorts"] == 0)
+        if verbose:
+            print(f"    W={W:3d} Wz={Wz:3d}: routed {rep['total_routed']}/{rep['nets']} "
+                  f"local={rep['local']} global={rep['global']} "
+                  f"shorts={rep['local_shorts']}"
+                  f"{'  <= complete' if complete else ''}", flush=True)
+        if best is None or (rep["total_routed"], -rep["local_shorts"]) > \
+                (best[0]["total_routed"], -best[0]["local_shorts"]):
+            best = (rep, r, g, zres)
+        if complete:
+            return rep, r, g, zres
+    return best
+
+
 def main():
     from placer import place
     nls = json.load(open(os.path.join(BASE, "..", "riscv_synth", "netlists.json")))
+    if "--adaptive" in sys.argv:
+        mods = [a for a in sys.argv[1:]
+                if not a.isdigit() and not a.startswith("-")] or list(nls.keys())
+        print(f"{'module':12s} {'gates':>5s} {'W':>4s} {'Wz':>4s} "
+              f"{'local':>5s} {'glob':>5s} {'routed':>9s} {'short':>5s} {'secs':>6s}")
+        for mod in mods:
+            pl = place(nls[mod], col_gap=16, row_gap=16)
+            rep, _r, _g, _z = route_adaptive(pl, verbose="-v" in sys.argv)
+            done = "OK" if rep["total_routed"] == rep["nets"] \
+                           and rep["local_shorts"] == 0 else "INCOMPLETE"
+            print(f"{mod:12s} {len(nls[mod]['cells']):5d} {rep['zone_width']:4d} "
+                  f"{rep['zone_depth']:4d} {rep['local']:5d} {rep['global']:5d} "
+                  f"{str(rep['total_routed'])+'/'+str(rep['nets']):>9s} "
+                  f"{rep['local_shorts']:5d} {rep['secs']:6.1f}  {done}", flush=True)
+        return
     mods = [a for a in sys.argv[1:] if not a.isdigit()] or ["alu1"]
     zw = next((int(a) for a in sys.argv[1:] if a.isdigit()), 64)
     for mod in mods:
