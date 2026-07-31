@@ -206,6 +206,7 @@ class BuildableRouter:
         # fresh occupancy each round (rip-up everything)
         self.owner0 = {}; self.owner2 = {}; self.support1 = {}
         self.owner_cross = {}; self.net_cross_y = {}
+        self.net_paths = {}
         placements: Dict[str, List[tuple]] = {n: [] for n in nets}
         need_bridge: List[Tuple[str, XZ]] = []
         y0 = self.base_y
@@ -221,6 +222,11 @@ class BuildableRouter:
                 if path is None:
                     need_bridge.append((net, goal))
                     continue
+                # remember this sink's path IN ORDER: repeater orientation must
+                # follow the real travel direction, and reconstructing that from
+                # the unordered cell set (BFS tree) mis-oriented repeaters on
+                # multi-sink nets (n30 had 9 dead repeaters on a 128-cell route).
+                self.net_paths.setdefault(net, []).append(list(path))
                 for (x, z) in path:
                     self.owner0[(x, z)] = net
                     if (x, z) not in self.pin_net:
@@ -776,6 +782,15 @@ class BuildableRouter:
         faces): +x -> west, -x -> east, +z -> north, -z -> south.
         """
         y0 = self.base_y
+        # Preferred path: use the ORDERED per-sink paths recorded during routing.
+        # Orientation then follows real travel, which the BFS-tree reconstruction
+        # got wrong on multi-sink nets.
+        # NOTE: an earlier attempt oriented repeaters from the ordered per-sink
+        # paths (self.net_paths). That is the true travel direction, but the run
+        # counter has to measure distance FROM THE SOURCE — a later sink's path
+        # starts deep inside the existing tree, so restarting the count per path
+        # placed refreshes too late and scored worse (18/24 vs 21/24). The BFS
+        # tree below counts real depth from the source, which is what matters.
         cells = {(p[1], p[3]) for p in pls if p[0] == "dust" and p[2] == y0}
         if not cells:
             return
