@@ -217,7 +217,9 @@ class BuildableRouter:
             tree: Set[XZ] = {src_xz}
             first = True
             for k in sorted(self.pl.net_sinks[net], key=lambda k: abs(s[0]-k[0])+abs(s[2]-k[2])):
-                goal = (k[0], k[2])
+                # route to the pin's WEST FEED cell, not the pin itself: the pin
+                # is a west-facing repeater and only conducts from that one cell.
+                goal = (k[0] - 1, k[2])
                 path = self._plane_bfs(tree, goal, net, soft=soft)
                 if path is None:
                     need_bridge.append((net, goal))
@@ -479,10 +481,10 @@ class BuildableRouter:
         # (-x descent), each with a small z offset — and take the first one whose
         # whole run is clear. The landing must end orthogonally adjacent to the
         # pin so the pin's west-facing repeater is fed without being covered.
-        cand = []
-        for dz in (0, 1, -1, 2, -2):
-            cand.append(("W", dz))     # descend eastward, land at gx-1
-            cand.append(("E", dz))     # descend westward, land at gx+1
+        # Only WEST-side descents: the pin is a west-facing repeater, so the
+        # signal must arrive at (gx-1, gz). Landing east of the pin (the old "E"
+        # candidates) can never feed it.
+        cand = [("W", dz) for dz in (0, 1, -1, 2, -2)]
         chosen = None
         for (side, dz) in cand:
             zz = gz + dz
@@ -756,9 +758,12 @@ class BuildableRouter:
             bad = False
             for k in self.pl.net_sinks.get(n, []):
                 kx, kz = k[0], k[2]
-                fed = any((kx + dx, kz + dz) in own
-                          for dx, dz in ((-1, 0), (0, 0), (0, 1), (0, -1), (1, 0)))
-                if not fed:
+                # A gate input pin is a repeater[facing=west]: it reads ONLY the
+                # cell to its WEST. Accepting any orthogonal neighbour counted
+                # nets as routed while their signal actually arrived from the
+                # north/south and could never enter the pin (n30 delivered 5 to
+                # (93,0,-1) beside a pin that only reads (92,0,0)).
+                if (kx - 1, kz) not in own:
                     bad = True; break
             if bad:
                 failed.append(n)
