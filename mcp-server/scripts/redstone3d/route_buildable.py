@@ -182,7 +182,11 @@ class BuildableRouter:
             order = priority + [n for n in base_order if n not in priority]
             res = self._route_once(order, soft=False, verbose=verbose and rnd == 0)
             shorts, _ = self._count_shorts(res)
-            key = (len(res.failed), shorts)
+            # A short makes the whole module compute WRONG answers, while an
+            # unrouted net only leaves a feature missing — so shorts dominate the
+            # comparison. (Ranking by failed-count first once picked a 3-failed /
+            # 5-short round over a 5-failed / 0-short one.)
+            key = (shorts, len(res.failed))
             if verbose and (rnd < 3 or key < best_key):
                 print(f"  round {rnd}: failed={len(res.failed)} shorts={shorts} "
                       f"order_head={order[:3]}", flush=True)
@@ -342,6 +346,20 @@ class BuildableRouter:
                         o = self.owner0.get((xx, zz))
                         if o is not None and o != net:
                             self.hist0[(xx, zz)] = self.hist0.get((xx, zz), 0.0) + weight
+                # Extra pressure on the DESCENT CORRIDORS this sink needs. The
+                # remaining failures are all "DESCENT conflict", and static room
+                # is plentiful (measured: every sink has a 15-40 cell clear west
+                # run) — the lanes are simply taken by nets routed earlier. Making
+                # those specific cells expensive is what actually frees a corridor;
+                # the coarse bounding-box penalty alone never targeted them.
+                gx, gz = k[0], k[2]
+                for dz in (0, 1, -1, 2, -2):
+                    zz = gz + dz
+                    for xx in range(gx - 24, gx):
+                        o = self.owner0.get((xx, zz))
+                        if o is not None and o != net:
+                            self.hist0[(xx, zz)] = \
+                                self.hist0.get((xx, zz), 0.0) + weight * 2
 
     def _net_wire_xzs(self, net, placements) -> Set[XZ]:
         """xz of this net's y=0 dust so far (bridge can start from one)."""
