@@ -28,7 +28,7 @@ from via_gadget import (up_tower_cells, trunk_cells, down_tower_cells_dir,
                         inverter_cells)
 from route_buildable import BuildableRouter
 from reserve import ReserveMap, reservation_from_cells
-from delivery_box import box_for_sink
+from delivery_box import delivery_for_sink
 
 Pos = Tuple[int, int, int]
 XZ = Tuple[int, int]
@@ -52,7 +52,7 @@ class GlobalResult:
 
 
 class GlobalFirstRouter:
-    def __init__(self, placement, zone_width: int = 64, trunk_y: int = 9,
+    def __init__(self, placement, zone_width: int = 64, trunk_y: int = 5,
                  zone_depth: int = 128):
         self.pl = placement
         self.W = zone_width
@@ -61,8 +61,10 @@ class GlobalFirstRouter:
         self.x0, self.x1 = mn[0], mx[0]
         self.z0, self.z1 = mn[2], mx[2]
         self.base_y = mn[1]
-        # trunk dust plane: an UP tower delivers at base+4k+1, so trunk_y must be
-        # base + 4k + 1 for a non-inverting climb.
+        # Trunk height satisfies BOTH ends: the source UP tower delivers at
+        # base+4k+1 (non-inverting only for an even torch count), and the sink
+        # DeliveryBox is a staircase that loses one level per level dropped, so it
+        # is only verified for drops <= 8. y=5 is the value that fits both.
         self.trunk_y = trunk_y
         self.cell_xz: Set[XZ] = {(p[0], p[2]) for p in placement.occupancy}
         # (x,z) -> net for every column a delivery tower occupies. A tower spans
@@ -187,8 +189,8 @@ class GlobalFirstRouter:
             # The router's only remaining job here is packing.
             box = None
             for gap in (2, 3, 4, 5, 6):
-                cand = box_for_sink((k[0], k[2]), self.trunk_y, self.base_y,
-                                    gap=gap)
+                cand, _kind = delivery_for_sink((k[0], k[2]), self.trunk_y,
+                                                self.base_y, gap=gap)
                 cols = cand.cells()
                 if any(c in self.cell_xz or c in self.pin_xz for c in cols):
                     continue
