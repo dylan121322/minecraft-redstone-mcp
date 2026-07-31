@@ -148,6 +148,37 @@ def down_tower_cells_dir(ax, az, y_top, y_bot, side=(0, 1), arm=(1, 0)):
 
 TORCH_STAND = "minecraft:redstone_torch"
 
+_WT_FOR_DIR = {(1, 0): "east", (-1, 0): "west", (0, 1): "south", (0, -1): "north"}
+
+
+def inverter_cells(x, y, z, direction=(1, 0)):
+    """One-level INVERTER, verified in test_inverter (variant I1): drive high ->
+    output 0, drive low -> output 15, and the output actually drives a west-facing
+    gate input pin.
+
+    Needed because the 2x2 DOWN tower inverts no matter how many cycles it uses
+    (8/10/12 torches all measured inverting) — the earlier "even torch count is
+    non-inverting" reading came from driving the tower's top dust directly, which
+    is not how it is used. One inverter in the delivery path cancels that.
+
+    Layout along `direction` starting at (x,y,z), which must already hold the
+    incoming dust:
+        (x,y,z)        incoming dust           [caller's]
+        +1 step        solid block             <- powered by that dust
+        +2 steps       wall torch facing `direction`  (support = the block behind)
+        +3 steps       output dust
+    Returns (placements, out_cell) where out_cell is the output dust position.
+    """
+    dx, dz = direction
+    facing = _WT_FOR_DIR[direction]
+    b = (x + dx, y, z + dz)
+    t = (x + 2 * dx, y, z + 2 * dz)
+    o = (x + 3 * dx, y, z + 3 * dz)
+    p = [(b[0], b[1], b[2], S),
+         (t[0], t[1], t[2], f"minecraft:redstone_wall_torch[facing={facing}]"),
+         (o[0], o[1], o[2], W)]
+    return p, o
+
 
 def up_tower_cells(ax, az, y_bot, y_top, feed_dir=(-1, 0)):
     """VERIFIED 1x1 UP tower (test_via_tower / test_rise_aligned): a standing-torch

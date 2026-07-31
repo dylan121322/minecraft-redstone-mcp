@@ -131,23 +131,26 @@ class GlobalFirstRouter:
         top_x = tx + 1
         res.reserved.update({(tx, sz), (top_x, sz)})
 
-        # ---- get from the tower's z to the trunk row, then run east/west
-        # vertical leg on the trunk plane (same layer, unique column) then the row
-        for z in range(min(sz, row), max(sz, row) + 1):
-            put((top_x, self.trunk_y - 1, z), S)
-            put((top_x, self.trunk_y, z), W)
+        # ---- leg from the tower's z up to the trunk row, on the tower's column.
+        # This leg needs refresh repeaters exactly like the row does: the rows sit
+        # beyond the field (z > z1), so the leg can be tens of cells long and an
+        # unrefreshed dust run dies after 15 (measured: a 45-cell leg delivered 0).
+        self._leg(put, top_x, sz, row, res)
         res.reserved.add((top_x, row))
 
         # ---- trunk row spanning every sink column
-        xs = [top_x] + [k[0] - 2 for k in sinks]
-        x_lo, x_hi = min(xs), max(xs)
+        # ONE eastward run only. Laying a second, westward run from the same
+        # injection point put two opposing sets of refresh repeaters on one row;
+        # they pushed against each other and the row read 0 near the source while
+        # showing power at the far end (diagnosed with diag_global_link: the leg
+        # power went 15,12,5,10,15,8,1,0 instead of decaying monotonically).
+        # Measured across five modules: 0 of 148 global sinks lie west of their
+        # source (the placer's topological columns make data flow west->east), so
+        # a single eastward trunk is sufficient.
+        x_hi = max([top_x] + [k[0] - 3 for k in sinks])
         tr, _ = trunk_cells(row, top_x, x_hi, self.trunk_y)
         for (x, y, z, b) in tr:
             put((x, y, z), b)
-        if x_lo < top_x:
-            tr2, _ = trunk_cells(row, top_x, x_lo, self.trunk_y)
-            for (x, y, z, b) in tr2:
-                put((x, y, z), b)
 
         # ---- each sink: come off the row on its own column, drop into the pin
         for k in sinks:
@@ -155,28 +158,30 @@ class GlobalFirstRouter:
             # step EAST of the shaft, and east of the feed cell is the pin itself,
             # so the tower cannot land directly on the feed. Drop it one column
             # further west and bridge east with a single y0 dust.
-            fx, fz = k[0] - 2, k[2]
+            # Shaft at k-3 so the tower's torch column (one east of the shaft,
+            # k-2) stays clear of the feed cell at k-1. With the shaft at k-2 the
+            # torch column WAS the feed column, and the rungs' output fought the
+            # feed dust — every global link read 0.
+            fx, fz = k[0] - 3, k[2]
             feed_cell = (k[0] - 1, k[2])
             if any(c in self.cell_xz or c in self.pin_xz
                    for c in ((fx, fz), feed_cell)):
                 return False
-            # vertical leg on the trunk plane from the row to the sink's z
-            for z in range(min(fz, row), max(fz, row) + 1):
-                put((fx, self.trunk_y - 1, z), S)
-                put((fx, self.trunk_y, z), W)
+            # leg down the sink's column from the trunk row to the sink's z
+            self._leg(put, fx, row, fz, res)
             # parity bridge then the 2x2 down tower
+            # Parity bridge to an even span, then stop the tower TWO levels above
+            # the floor: its last cycle would otherwise place a wall torch at
+            # y=base_y, where the floor slab and the feed dust overwrite it. That
+            # lost torch made the count odd (7 instead of 8), so the tower
+            # inverted and every sink read a constant high on drive=0.
             dn_from = self.trunk_y
             if (dn_from - self.base_y) % 2:
                 put((fx, dn_from - 2, fz), S)
                 put((fx, dn_from - 1, fz), W)
                 dn_from -= 1
             placed = False
-            # Rotations that reach AWAY from the pin come first: the feed cell sits
-            # immediately west of the pin, so an arm pointing east (+x) lands on
-            # the pin's own gate and every rotation gets rejected — that was why
-            # all 14 globals failed on the first run.
-            # Only the rotations proven in test_down_dirs are used (side=(1,0);
-            # arm=-x and side=-x variants measured non-functional).
+            # Rotations proven in test_down_dirs (side=(1,0) family only).
             for arm, side in (((0, 1), (1, 0)), ((0, -1), (1, 0)),
                               ((1, 0), (0, 1)), ((1, 0), (0, -1))):
                 foot = {(fx, fz),
@@ -185,12 +190,22 @@ class GlobalFirstRouter:
                         (fx + arm[0] + side[0], fz + arm[1] + side[1])}
                 if any(c in self.cell_xz or c in self.pin_xz for c in foot):
                     continue
+                # Land the tower directly on the base plane, exactly as the
+                # end-to-end reference (test_trunk_e2e) does. An earlier attempt
+                # stopped two levels short and bridged down with a staircase,
+                # on the theory that the last torch was buried by the floor slab;
+                # the reference proves otherwise and the detour broke the link.
                 dn, _ = down_tower_cells_dir(fx, fz, dn_from, self.base_y,
                                              side=side, arm=arm)
                 for (x, y, z, b) in dn:
                     put((x, y, z), b)
-                put((fx, self.base_y, fz), W)           # tower's bottom dust
-                put((feed_cell[0], self.base_y, feed_cell[1]), W)  # bridge east
+                # Do NOT write over (fx, base_y): with this rotation the tower's
+                # LAST torch lands exactly there, and overwriting it with dust cut
+                # the torch count from 8 to 7 — an odd count inverts, which is why
+                # every sink read a constant value independent of the source.
+                # Start the eastward feed run one column over.
+                for xx in range(fx + 1, feed_cell[0] + 1):
+                    put((xx, self.base_y, fz), W)
                 res.reserved.update(foot | {feed_cell})
                 placed = True
                 break
@@ -198,6 +213,38 @@ class GlobalFirstRouter:
                 return False
         res.wire_count = sum(1 for b in res.blocks.values() if b == W)
         return True
+
+    def _leg(self, put, x, z_from, z_to, res, refresh=12):
+        """A z-direction run on the trunk plane at column `x`, with a refresh
+        repeater every `refresh` cells. Travel +z needs facing=north and -z needs
+        facing=south (a repeater reads the side it faces — verified in
+        test_rep_facing). Straight line, so the orientation is unambiguous."""
+        if z_from == z_to:
+            put((x, self.trunk_y - 1, z_from), S)
+            put((x, self.trunk_y, z_from), W)
+            res.reserved.add((x, z_from))
+            return
+        step = 1 if z_to > z_from else -1
+        facing = "north" if step == 1 else "south"
+        # Start the counter at the threshold so the FIRST cell after the junction
+        # is a repeater. A leg branches off a trunk whose signal has already
+        # attenuated (measured: 10 at the junction), so waiting the full 12 cells
+        # let it reach 0 before the first refresh and the whole leg died.
+        run = refresh
+        z = z_from
+        while True:
+            put((x, self.trunk_y - 1, z), S)
+            run += 1
+            if run >= refresh and z != z_to and z != z_from:
+                put((x, self.trunk_y, z),
+                    f"minecraft:repeater[facing={facing},delay=1]")
+                run = 0
+            else:
+                put((x, self.trunk_y, z), W)
+            res.reserved.add((x, z))
+            if z == z_to:
+                break
+            z += step
 
     # ---------- P3: local nets, per zone, avoiding the reservations ----------
     def route_locals(self, local: List[str], reserved: Set[XZ], rounds=2):
