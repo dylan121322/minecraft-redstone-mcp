@@ -19,12 +19,22 @@ RB = "minecraft:redstone_block"
 W = "minecraft:redstone_wire"
 
 
-def test_net(blocks, net, src, sinks, base_y):
-    """Drive the net's source pin, read each sink's west feed."""
+def test_net(blocks, net, src, sinks, base_y, isolate_gates=True):
+    """Drive the net's source pin, read each sink's west feed.
+
+    isolate_gates: the chip is only partially routed, so gates whose inputs are
+    still unrouted float — and a floating gate's output wall-torch is LIT, which
+    injects a constant 1 into whatever wire runs past it. That made unrelated
+    nets read a fixed 14 regardless of what we drove (n27/n16/n19). Replacing
+    every gate output torch with air removes that artefact so the measurement
+    reflects the ROUTING only.
+    """
     out = {}
     for drive in (0, 1):
         sc = nuc.Schematic.create(f"lk_{net}_{drive}")
         for (x, y, z, s) in blocks:
+            if isolate_gates and "wall_torch" in s:
+                continue        # drop gate output torches (floating-gate noise)
             sc.set_block_from_string(x, y, z, s)
         sx, sz = src[0], src[2]
         # The placer publishes each source one cell EAST of the real gate output
