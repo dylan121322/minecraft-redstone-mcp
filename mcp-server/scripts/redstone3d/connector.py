@@ -47,6 +47,10 @@ class Connector:
     """
     a_out: Pos
     b_in: Pos
+    # When the downstream input is a repeater (facing west, as all our module
+    # inputs now are), the connector must deliver to the cell WEST of it — the
+    # repeater reads that cell. Pointing b at the repeater itself drives nothing.
+    b_is_repeater: bool = False
     # Cells belonging to the neighbouring modules. The connector must not place
     # anything there: its skin naturally wraps past an interface into the module on
     # the other side, and 3 of the 31 shared cells disagreed about their contents,
@@ -107,7 +111,7 @@ class Connector:
         # deliveries reading a constant 13-14 (default-lit torch) with the source
         # cut. The repeater's output is the connector's b_cell.
         self.a_cell = self.a_out
-        self.b_cell = self.b_in
+        self.b_cell = (bx - 1, by, bz) if self.b_is_repeater else self.b_in
         self.length = abs(bx - ax) + abs(bz - az)
         if body:
             last = self.b_cell

@@ -70,6 +70,7 @@ def build(plane, run_to, row, sink_x, base_y=0):
         db = TowerBox(anchor=(sink_x - 2 - span, plane, row), drop=drop)
     # hand the connector both neighbours' cells so its skin cannot overwrite them
     cn = Connector(a_out=tb.out_cell, b_in=db.in_cell,
+                   b_is_repeater=True,                 # module inputs are repeaters
                    keep_out=frozenset(tb.blocks) | frozenset(db.blocks))
     return tb, cn, db
 
