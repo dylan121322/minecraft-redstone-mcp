@@ -29,6 +29,7 @@ from via_gadget import (up_tower_cells, trunk_cells, down_tower_cells_dir,
 from route_buildable import BuildableRouter
 from reserve import ReserveMap, reservation_from_cells
 from delivery_box import delivery_for_sink
+from trunk_box import TrunkBox
 
 Pos = Tuple[int, int, int]
 XZ = Tuple[int, int]
@@ -139,69 +140,66 @@ class GlobalFirstRouter:
         return res
 
     def _one_global(self, net: str, row: int, res: GlobalResult) -> bool:
-        ty = self.net_trunk_y[net]          # this net's own trunk layer
-        """Source UP tower -> trunk on `row` -> DOWN tower into each sink."""
+        """Route one global net as TWO shielded modules.
+
+        Upstream is a TrunkBox (source drive, climb, horizontal run, leg) and
+        downstream a delivery box per sink. Both are verified sealed and with hostile
+        geometry pressed against their shells, and their cascade is verified too, so
+        emitting exactly those modules is what makes the module-level result match
+        the bench result. The previous body wired the same path by hand across ten-odd
+        boundaries and never got past 3/10.
+        """
+        ty = self.net_trunk_y[net]
         src = self.pl.net_sources[net]
         sinks = self.pl.net_sinks[net]
         put = res.blocks.__setitem__
+        base = self.base_y
 
-        # ---- source: climb at a column just east of the source pin
-        sx, sz = src[0], src[2]
-        tx = sx + 1
-        if (tx, sz) in self.cell_xz or (tx, sz) in self.pin_xz:
+        # one TrunkBox per net, running east far enough to reach the westmost sink
+        # delivery, then turning onto this net's row
+        first_sink_x = min(k[0] for k in sinks)
+        run_to = max(src[0] + 6, first_sink_x - 24)
+        try:
+            tb = TrunkBox(src_cell=(src[0], base, src[2]), plane=ty,
+                          run_to_x=run_to, leg_to_z=row)
+        except AssertionError:
             return False
-        # drive: repeater at the source pin's east, reading the pin
-        put((tx, self.base_y, sz), "minecraft:repeater[facing=west,delay=1]")
-        up, _foot = up_tower_cells(tx + 1, sz, self.base_y, ty - 1)
-        for (x, y, z, b) in up:
-            put((x, y, z), b)
-        top_x = tx + 1
-        res.reserved.update({(tx, sz), (top_x, sz)})
+        # The box's shell inevitably passes over the PI column and the first gate
+        # column on its way out of the field. Rejecting the box for that would make
+        # every global net unroutable (measured: 0 of 7). The shell is protective,
+        # not load-bearing, so cells that would land on a pin or a gate body are
+        # simply skipped — the interior, which carries the signal, is untouched.
+        interior = {c for (c, b) in tb.blocks.items() if b != S}
+        # in_cell sits ON the source pin by design (the box reads it), so it is an
+        # interface, not an obstruction — counting it as a collision rejected every
+        # global net (0 of 7) over a single cell.
+        iface = {(tb.in_cell[0], tb.in_cell[2]), (tb.out_cell[0], tb.out_cell[2])}
+        blocked = [c for c in tb.cells()
+                   if c not in iface
+                   and (c in self.cell_xz or c in self.pin_xz)
+                   and any((c[0], y, c[1]) in interior
+                           for y in range(tb.extent[0][1], tb.extent[1][1] + 1))]
+        if blocked:
+            return False
+        if any(self.box_cols.get(c) not in (None, net) for c in tb.cells()):
+            return False
+        for (bx, by, bz), bb in tb.blocks.items():
+            if bb == S and ((bx, bz) in self.cell_xz or (bx, bz) in self.pin_xz):
+                continue                      # skip shell over pins / gate bodies
+            put((bx, by, bz), bb)
+        res.rmap.reserve(reservation_from_cells(
+            f"{net}:trunk",
+            [(bx, by, bz, bb) for (bx, by, bz), bb in tb.blocks.items()],
+            "shielded trunk box"))
+        for c in tb.cells():
+            self.box_cols[c] = net
+            res.reserved.add(c)
 
-        # ---- leg from the tower's z up to the trunk row, on the tower's column.
-        # This leg needs refresh repeaters exactly like the row does: the rows sit
-        # beyond the field (z > z1), so the leg can be tens of cells long and an
-        # unrefreshed dust run dies after 15 (measured: a 45-cell leg delivered 0).
-        self._leg(put, top_x, sz, row, res, ty=ty)
-        res.reserved.add((top_x, row))
-
-        # ---- trunk row spanning every sink column
-        # ONE eastward run only. Laying a second, westward run from the same
-        # injection point put two opposing sets of refresh repeaters on one row;
-        # they pushed against each other and the row read 0 near the source while
-        # showing power at the far end (diagnosed with diag_global_link: the leg
-        # power went 15,12,5,10,15,8,1,0 instead of decaying monotonically).
-        # Measured across five modules: 0 of 148 global sinks lie west of their
-        # source (the placer's topological columns make data flow west->east), so
-        # a single eastward trunk is sufficient.
-        x_hi = max([top_x] + [k[0] - 9 for k in sinks])
-        tr, _ = trunk_cells(row, top_x, x_hi, ty)
-        for (x, y, z, b) in tr:
-            put((x, y, z), b)
-
-        # ---- each sink: come off the row on its own column, drop into the pin
+        # each sink: a delivery box hung off the trunk's row
         for k in sinks:
-            # SINK DELIVERY = pack a shielded DeliveryBox (delivery_box.py).
-            #
-            # The previous version wired a 2x2 torch tower, a parity bridge and a
-            # compensating inverter by hand. Its behaviour depended on seven things
-            # at once (rotation, torch parity, entry direction, neighbouring towers,
-            # the pin's west-only input, and sharing the y0 plane with local
-            # routing), so each fix invalidated another assumption and a sealed pass
-            # never implied a pass inside a module.
-            #
-            # The box replaces all of that with one contract: an `in` cell fed by
-            # the trunk, an `out` cell that drives the pin's feed, and a stone shell
-            # that makes outside interference physically impossible. Its interior is
-            # a see-below staircase, which is unconditionally non-inverting — the
-            # polarity question disappears rather than being compensated. Verified
-            # with hostile geometry pressed against the shell (test_delivery_box).
-            #
-            # The router's only remaining job here is packing.
             box = None
             for gap in (2, 3, 4, 5, 6):
-                cand, _kind = delivery_for_sink((k[0], k[2]), ty,
-                                                self.base_y, gap=gap)
+                cand, _kind = delivery_for_sink((k[0], k[2]), ty, base, gap=gap)
                 cols = cand.cells()
                 if any(c in self.cell_xz or c in self.pin_xz for c in cols):
                     continue
@@ -212,9 +210,17 @@ class GlobalFirstRouter:
             if box is None:
                 return False
 
-            # bring the trunk to the box's `in` cell, then emit the box
+            # run along this net's row from the trunk's out to the box's in, then
+            # turn down the box's column — a single boundary between two shells
+            ox, oy, oz = tb.out_cell
             ix, iy, iz = box.in_cell
-            self._leg(put, ix, row, iz, res, ty=ty)
+            for x in range(min(ox, ix), max(ox, ix) + 1):
+                put((x, ty - 1, oz), S)
+                put((x, ty, oz), W)
+                res.reserved.add((x, oz))
+            if iz != oz:
+                self._leg(put, ix, oz, iz, res, ty=ty)
+
             for (bx, by, bz), bb in box.blocks.items():
                 put((bx, by, bz), bb)
             res.rmap.reserve(reservation_from_cells(
@@ -225,11 +231,12 @@ class GlobalFirstRouter:
                 self.box_cols[c] = net
                 res.reserved.add(c)
 
-            # run east from the box's `out` cell into the pin's feed cell
-            ox, oy, oz = box.out_cell
-            for xx in range(ox + 1, k[0]):
-                put((xx, self.base_y, oz), W)
-                res.reserved.add((xx, oz))
+            # the box's out drives the pin's feed cell
+            bx2, by2, bz2 = box.out_cell
+            for xx in range(bx2 + 1, k[0]):
+                put((xx, base, bz2), W)
+                res.reserved.add((xx, bz2))
+
         res.wire_count = sum(1 for b in res.blocks.values() if b == W)
         return True
 

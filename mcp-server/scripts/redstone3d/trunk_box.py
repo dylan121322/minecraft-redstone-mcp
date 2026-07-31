@@ -124,19 +124,30 @@ class TrunkBox:
         x0, x1 = min(xs), max(xs)
         y0, y1 = min(ys), max(ys)
         z0, z1 = min(zs), max(zs)
+        # Shell = a skin hugging the OCCUPIED cells, not a filled bounding box.
+        # Filling the box was catastrophic here: this module is long and thin (the
+        # run reaches hundreds of cells), so the bounding volume ran to 86k-265k
+        # blocks and MCHPRS tried to allocate 3.5 GB and died — which is why runs
+        # appeared to "finish with no output". Skinning only the real neighbours
+        # keeps the block count proportional to the wiring.
         shell: Dict[Pos, str] = {}
-        for ax in range(x0 - 1, x1 + 2):
-            for ay in range(y0 - 1, y1 + 2):
-                for az in range(z0 - 1, z1 + 2):
-                    if x0 <= ax <= x1 and y0 <= ay <= y1 and z0 <= az <= z1:
-                        continue
-                    shell[(ax, ay, az)] = S
+        for (cx, cy, cz) in body:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        q = (cx + dx, cy + dy, cz + dz)
+                        if q in body:
+                            continue
+                        shell.setdefault(q, S)
+        # Clear every neighbour of the two interface cells. With a skin-tight shell
+        # the interface is wrapped on all sides, so listing a couple of openings (as
+        # the filled-box version could afford to) sealed the very boundary the next
+        # module connects to — the cascade went from passing to dead.
         ic, oc = self.in_cell, self.out_cell
-        for opening in ((ic[0] - 1, ic[1], ic[2]),          # the gate feeds from west
-                        (oc[0] + 1, oc[1], oc[2]),          # delivery hangs off east
-                        (oc[0], oc[1], oc[2] + 1),
-                        (oc[0], oc[1], oc[2] - 1)):
-            shell.pop(opening, None)
+        for cell in (ic, oc):
+            for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                               (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                shell.pop((cell[0] + dx, cell[1] + dy, cell[2] + dz), None)
 
         self.blocks = {}
         self.blocks.update(shell)

@@ -119,25 +119,28 @@ class DeliveryBox:
 
         # SHELL: a stone skin one cell thick around the interior, except at the two
         # interface cells, which must stay reachable from outside.
+        # Skin the occupied cells rather than filling the bounding box: a filled box
+        # grows with the module's LENGTH, which for the long modules meant tens of
+        # thousands of stone blocks and an out-of-memory crash in MCHPRS.
         shell = {}
-        for sx in range(x0 - 1, x1 + 2):
-            for sy in range(y0 - 1, y1 + 2):
-                for sz in range(z0 - 1, z1 + 2):
-                    inside = (x0 <= sx <= x1 and y0 <= sy <= y1 and z0 <= sz <= z1)
-                    if inside:
-                        continue
-                    shell[(sx, sy, sz)] = S
+        for (cx, cy, cz) in body:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        q = (cx + dx, cy + dy, cz + dz)
+                        if q in body:
+                            continue
+                        shell.setdefault(q, S)
         # Open the interface faces. The trunk reaches the box along Z (it runs on a
         # row beyond the field and drops down the box's column), so the `in` face
         # must be open on BOTH z sides as well as the west — closing them made the
         # shell cut the very leg that feeds the box. The `out` face opens east,
         # towards the pin.
         ic, oc = self.in_cell, self.out_cell
-        for opening in ((ic[0] - 1, ic[1], ic[2]),
-                        (ic[0], ic[1], ic[2] - 1),
-                        (ic[0], ic[1], ic[2] + 1),
-                        (oc[0] + 1, oc[1], oc[2])):
-            shell.pop(opening, None)
+        for cell in (ic, oc):
+            for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                               (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                shell.pop((cell[0] + dx, cell[1] + dy, cell[2] + dz), None)
 
         self.blocks = {}
         self.blocks.update(shell)
@@ -236,19 +239,23 @@ class TowerBox:
         x0, x1 = min(xs), max(xs)
         y0, y1 = min(ys), max(ys)
         z0, z1 = min(zs), max(zs)
+        # Skin the occupied cells rather than filling the bounding box: a filled box
+        # grows with the module's LENGTH, which for the long modules meant tens of
+        # thousands of stone blocks and an out-of-memory crash in MCHPRS.
         shell = {}
-        for sx in range(x0 - 1, x1 + 2):
-            for sy in range(y0 - 1, y1 + 2):
-                for sz in range(z0 - 1, z1 + 2):
-                    if x0 <= sx <= x1 and y0 <= sy <= y1 and z0 <= sz <= z1:
-                        continue
-                    shell[(sx, sy, sz)] = S
+        for (cx, cy, cz) in body:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        q = (cx + dx, cy + dy, cz + dz)
+                        if q in body:
+                            continue
+                        shell.setdefault(q, S)
         ic, oc = self.in_cell, self.out_cell
-        for opening in ((ic[0] - 1, ic[1], ic[2]),
-                        (ic[0], ic[1], ic[2] - 1),
-                        (ic[0], ic[1], ic[2] + 1),
-                        (oc[0] + 1, oc[1], oc[2])):
-            shell.pop(opening, None)
+        for cell in (ic, oc):
+            for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                               (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                shell.pop((cell[0] + dx, cell[1] + dy, cell[2] + dz), None)
 
         self.blocks = {}
         self.blocks.update(shell)
