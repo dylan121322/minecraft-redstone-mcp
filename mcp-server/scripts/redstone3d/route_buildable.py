@@ -32,6 +32,14 @@ XZ = Tuple[int, int]
 _H = [(1, 0), (-1, 0), (0, 1), (0, -1)]
 _PLANE_SHELL = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
 MAX_RUN = 14
+# Sink connections longer than this skip the y=0 plane and go straight to a cross
+# layer. Keeps the signal plane free for local wiring and descent corridors.
+# Disabled (very large): forcing long sink connections onto a cross layer did
+# raise the routed count (24 -> 26) but WRECKED electrical correctness — only
+# 16 of 26 links still responded, versus 24 of 24 when long hauls stay on y=0.
+# Long cross runs are simply less reliable than the signal plane, so keep them
+# off unless a future change makes cross runs as robust as y0.
+LONG_HAUL = 10 ** 9
 FLOW_FACING = {(1, 0): "west", (-1, 0): "east", (0, 1): "north", (0, -1): "south"}
 
 
@@ -224,6 +232,17 @@ class BuildableRouter:
                 # route to the pin's WEST FEED cell, not the pin itself: the pin
                 # is a west-facing repeater and only conducts from that one cell.
                 goal = (k[0] - 1, k[2])
+                # LONG HAULS GO UPSTAIRS. Measured on alu1: 24 of 47 sink
+                # connections are >40 cells and the 5 unroutable nets are exactly
+                # the longest ones (up to 257 cells). Dragging those across y0
+                # fills the signal plane and blocks other nets' descent
+                # corridors, while the cross planes sit almost empty. Sending
+                # long runs to a cross layer is both more three-dimensional and
+                # SHORTER (the cross plane is open, so the path is near-straight).
+                dist = abs(s[0] - k[0]) + abs(s[2] - k[2])
+                if dist > LONG_HAUL:
+                    need_bridge.append((net, goal))
+                    continue
                 path = self._plane_bfs(tree, goal, net, soft=soft)
                 if path is None:
                     need_bridge.append((net, goal))
