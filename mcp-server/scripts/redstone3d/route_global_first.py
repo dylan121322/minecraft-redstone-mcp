@@ -24,8 +24,10 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 sys.path.insert(0, os.path.join(BASE, "..", "riscv_synth"))
 
-from via_gadget import up_tower_cells, trunk_cells, down_tower_cells_dir
+from via_gadget import (up_tower_cells, trunk_cells, down_tower_cells_dir,
+                        inverter_cells)
 from route_buildable import BuildableRouter
+from reserve import ReserveMap, reservation_from_cells
 
 Pos = Tuple[int, int, int]
 XZ = Tuple[int, int]
@@ -38,6 +40,9 @@ LAYER_PITCH = 4          # Y between cross layers (keeps tower torch count even)
 @dataclass
 class GlobalResult:
     blocks: Dict[Pos, str] = field(default_factory=dict)
+    # protected regions for the multi-cell delivery gadgets, so nothing can write
+    # over a tower rung or an inverter torch without it being detected
+    rmap: "ReserveMap" = field(default_factory=lambda: ReserveMap())
     reserved: Set[XZ] = field(default_factory=set)     # y0 columns consumed
     routed: List[str] = field(default_factory=list)
     failed: List[str] = field(default_factory=list)
@@ -59,6 +64,11 @@ class GlobalFirstRouter:
         # base + 4k + 1 for a non-inverting climb.
         self.trunk_y = trunk_y
         self.cell_xz: Set[XZ] = {(p[0], p[2]) for p in placement.occupancy}
+        # (x,z) -> net for every column a delivery tower occupies. A tower spans
+        # two z rows, so two towers a few rows apart interfere: the neighbour's
+        # torch energises this tower's support block and holds its last rung dark
+        # (measured on n4 — 15 at y=2, 0 at y=0). A clear ring is required.
+        self.tower_cols: Dict[XZ, str] = {}
         self.pin_xz: Dict[XZ, str] = {}
         for n, p in placement.net_sources.items():
             self.pin_xz[(p[0], p[2])] = n
@@ -147,7 +157,7 @@ class GlobalFirstRouter:
         # Measured across five modules: 0 of 148 global sinks lie west of their
         # source (the placer's topological columns make data flow west->east), so
         # a single eastward trunk is sufficient.
-        x_hi = max([top_x] + [k[0] - 3 for k in sinks])
+        x_hi = max([top_x] + [k[0] - 9 for k in sinks])
         tr, _ = trunk_cells(row, top_x, x_hi, self.trunk_y)
         for (x, y, z, b) in tr:
             put((x, y, z), b)
@@ -162,7 +172,19 @@ class GlobalFirstRouter:
             # k-2) stays clear of the feed cell at k-1. With the shaft at k-2 the
             # torch column WAS the feed column, and the rungs' output fought the
             # feed dust — every global link read 0.
-            fx, fz = k[0] - 3, k[2]
+            # Delivery layout, fixed by the sealed stage tests (test_sealed):
+            #   shaft ... dust lead ... inverter(block,torch,out) ... run ... feed
+            # The tower INVERTS when the signal enters its top sideways from the
+            # trunk (single-stage tests that drove the top directly showed it as
+            # non-inverting, which is what produced the earlier contradictory
+            # readings), so exactly one inverter is inserted to cancel that.
+            # Budget west of the pin: feed at k-1, inverter output k-2, torch k-3,
+            # block k-4, dust lead k-5..k-6, shaft k-7.
+            # Column budget west of the pin (measured from the gadget output):
+            #   shaft fx, tower's last torch fx+1, dust lead 2, inverter 3
+            #   (block/torch/out), then the run into the feed at k-1.
+            LEAD = 2
+            fx, fz = k[0] - 9, k[2]
             feed_cell = (k[0] - 1, k[2])
             if any(c in self.cell_xz or c in self.pin_xz
                    for c in ((fx, fz), feed_cell)):
@@ -190,6 +212,16 @@ class GlobalFirstRouter:
                         (fx + arm[0] + side[0], fz + arm[1] + side[1])}
                 if any(c in self.cell_xz or c in self.pin_xz for c in foot):
                     continue
+                # A tower occupies two z rows, so two sinks three rows apart put
+                # their towers side by side and the neighbour's torch energises
+                # this tower's support block, holding its last rung dark. Measured
+                # on n4: its shaft at z=0 sat next to another tower at z=2 and the
+                # delivery read 15 at y=2 and 0 at y=0. Require a clear ring around
+                # the whole footprint, not merely unoccupied footprint cells.
+                ring = {(cx + dx, cz + dz) for (cx, cz) in foot
+                        for dx in (-1, 0, 1) for dz in (-1, 0, 1)}
+                if any(self.tower_cols.get(c) not in (None, net) for c in ring):
+                    continue
                 # Land the tower directly on the base plane, exactly as the
                 # end-to-end reference (test_trunk_e2e) does. An earlier attempt
                 # stopped two levels short and bridged down with a staircase,
@@ -199,14 +231,46 @@ class GlobalFirstRouter:
                                              side=side, arm=arm)
                 for (x, y, z, b) in dn:
                     put((x, y, z), b)
-                # Do NOT write over (fx, base_y): with this rotation the tower's
-                # LAST torch lands exactly there, and overwriting it with dust cut
-                # the torch count from 8 to 7 — an odd count inverts, which is why
-                # every sink read a constant value independent of the source.
-                # Start the eastward feed run one column over.
-                for xx in range(fx + 1, feed_cell[0] + 1):
+                # Never write over (fx, base_y): with these rotations the tower's
+                # last torch lands there, and replacing it with dust would drop the
+                # torch count by one and flip the polarity.
+                # Dust lead so the inverter's input block is fed by DUST only —
+                # feeding it straight off another solid block double-drives the
+                # input and pins the output high (measured in the sealed S4 test).
+                # The tower's own cells at y=base include a wall torch one column
+                # EAST of the shaft (its last rung). The dust lead must start
+                # beyond that, or it overwrites the torch — which is exactly what
+                # made n4 read 15 at y=2 and 0 at y=0.
+                tower_base_cols = {x for (x, y, _z, _b) in dn if y == self.base_y}
+                lead_from = max([fx] + sorted(tower_base_cols)) + 1
+                for i in range(LEAD):
+                    put((lead_from + i, self.base_y, fz), W)
+                inv_at = lead_from + LEAD - 1
+                icells, iout = inverter_cells(inv_at, self.base_y, fz,
+                                              direction=(1, 0))
+                res.rmap.reserve(reservation_from_cells(
+                    f"{net}:sink@{k[0]},{k[2]}:inverter", icells, "I1 inverter"))
+                for (ix, iy, iz2, ib) in icells:
+                    put((ix, iy, iz2), ib)
+                # run east from the inverter's output into the pin's feed cell
+                for xx in range(iout[0] + 1, feed_cell[0] + 1):
                     put((xx, self.base_y, fz), W)
+                # Reserve EVERY column the tower occupies, not just its footprint
+                # corners. The tower's last torch sits in the shaft column at
+                # y=base, and the per-zone local routing — which emits the whole
+                # base plane — was overwriting it with dust; the tower then read 15
+                # at y=2 and 0 at y=0 (diagnosed on n4).
+                # Register the gadget's exact expected layout so any later write
+                # into these cells is caught (and blocked) instead of silently
+                # flipping the delivery's polarity.
+                res.rmap.reserve(reservation_from_cells(
+                    f"{net}:sink@{k[0]},{k[2]}:tower", dn, "2x2 down tower"))
+                for (tx2, _ty2, tz2, _tb2) in dn:
+                    self.tower_cols[(tx2, tz2)] = net
+                res.reserved.update({(x, z) for (x, _y, z, _b) in dn})
                 res.reserved.update(foot | {feed_cell})
+                res.reserved.update({(fx + i, fz) for i in range(1, LEAD + 1)})
+                res.reserved.update({(ix, iz2) for (ix, _iy, iz2, _ib) in icells})
                 placed = True
                 break
             if not placed:

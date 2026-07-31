@@ -63,15 +63,26 @@ def verify(mod, nl, jobs, limit=None):
     rep, r, g, zres = route_adaptive(pl)
 
     blocks = {}
-    def setter(x, y, z, s):
+    def raw(x, y, z, s):
         if s == "minecraft:air":
             blocks.pop((x, y, z), None)
         else:
             blocks[(x, y, z)] = s
+    # Local routing and the cell library go through a GUARDED setter: writes into
+    # a reserved gadget cell are dropped and recorded, so a broken delivery is
+    # reported with its culprit instead of having to be hunted down by bisection.
+    guarded = g.rmap.guarded_setter(raw, writer="local")
     for (_z, _nets, rr, _sh) in zres:
-        emit_blocks(setter, pl, rr, {n: 0 for n in nl["inputs"]})
+        emit_blocks(guarded, pl, rr, {n: 0 for n in nl["inputs"]})
     for (x, y, z), b in g.blocks.items():
-        setter(x, y, z, b)
+        raw(x, y, z, b)
+    viol = g.rmap.audit(blocks)
+    if viol:
+        print(f"# RESERVE AUDIT: {len(viol)} violation(s), first 8:", flush=True)
+        for v in viol[:8]:
+            print(f"#   {v}", flush=True)
+    else:
+        print(f"# RESERVE AUDIT: clean  {g.rmap.summary()}", flush=True)
 
     routed = list(g.routed)
     for _z, nets, rr, _sh in zres:

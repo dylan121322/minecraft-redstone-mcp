@@ -79,7 +79,7 @@ def main():
     show("leg end at row", (tcol, ty, row))
     # sample the trunk row
     for k in sinks:
-        fx = k[0] - 2
+        fx = k[0] - 9   # shaft column (see route_global_first: k-9)
         for x in range(min(tcol, fx), max(tcol, fx) + 1,
                        max(1, abs(fx - tcol) // 6 or 1)):
             p = (x, ty, row)
@@ -95,7 +95,11 @@ def main():
             p = (fx, y, k[2])
             if p in blocks:
                 show(f"down y={y}", p)
-        show("feed cell", (k[0] - 1, r.base_y, k[2]))
+        # walk the whole delivery run: tower bottom -> lead -> inverter -> feed
+        for xx in range(fx, k[0] + 1):
+            p = (xx, r.base_y, k[2])
+            if p in blocks:
+                show(f"deliver x={xx}", p)
         break
 
 
