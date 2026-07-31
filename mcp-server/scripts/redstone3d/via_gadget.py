@@ -102,6 +102,84 @@ def rep_e():
     return "minecraft:repeater[facing=east,delay=1]"
 
 
+TORCH_W = "minecraft:redstone_wall_torch[facing=west]"
+TORCH_E = "minecraft:redstone_wall_torch[facing=east]"
+
+
+_WT = {(-1, 0): "minecraft:redstone_wall_torch[facing=west]",
+       (1, 0): "minecraft:redstone_wall_torch[facing=east]",
+       (0, -1): "minecraft:redstone_wall_torch[facing=north]",
+       (0, 1): "minecraft:redstone_wall_torch[facing=south]"}
+
+
+def down_tower_cells_dir(ax, az, y_top, y_bot, side=(0, 1), arm=(1, 0)):
+    """Same verified DOWN leg, but with a CHOOSABLE partner direction so the
+    2x2 shaft can be rotated when the default orientation is blocked (measured:
+    almost every failure was a `shaft conflict`, usually on the partner row).
+
+    `arm` is the offset from the A column to the torch column, `side` the offset
+    from the A column to the partner dust column. A wall torch facing D has its
+    support on the -D side, so:
+      torch1 at A+arm  must face  +arm   (support = A block)
+      torch2 at A+side must face  -side... expressed via the partner block.
+    Returns (placements, footprint).
+    """
+    assert (y_top - y_bot) % 2 == 0, "down tower needs an even Y span"
+    p = []
+    px, pz = ax + arm[0] + side[0], az + arm[1] + side[1]   # partner dust column
+    t1 = (ax + arm[0], az + arm[1])
+    t2 = (ax + side[0], az + side[1])
+    y = y_top
+    while y > y_bot:
+        p.append((ax, y - 1, az, S))                       # support under A dust
+        p.append((t1[0], y - 1, t1[1], _WT[arm]))          # support = A block
+        p.append((px, y - 2, pz, S))                       # support under partner
+        p.append((px, y - 1, pz, W))                       # partner dust
+        # torch2 sits at A+side and must be supported by the PARTNER block, which
+        # lies in the +arm direction from it — so it faces -arm (a wall torch's
+        # support is on the side opposite its facing).
+        p.append((t2[0], y - 2, t2[1], _WT[(-arm[0], -arm[1])]))
+        if y - 3 >= y_bot - 1:
+            p.append((ax, y - 3, az, S))
+        p.append((ax, y - 2, az, W))                       # back in column A
+        y -= 2
+    return p, {(ax, az), t1, t2, (px, pz)}
+
+
+def down_tower_cells(ax, az, y_top, y_bot):
+    """VERIFIED bidirectional-tower DOWN leg (test_tower_bidir: all depths OK,
+    non-inverting, full strength at the bottom, no decay).
+
+    Carries a signal from a dust at (ax, y_top, az) down to a dust at
+    (ax, y_bot, az) using a CONSTANT 2x2 footprint — columns (ax,az) and
+    (ax+1, az+1) — instead of a staircase whose length grows with the depth.
+    (y_top - y_bot) must be even: each cycle is 2 wall torches and drops 2 Y, so
+    an even number of torches keeps the transfer non-inverting.
+
+    Wall-torch rules used (test_walltorch_attach): facing=X attaches to the
+    neighbour on the OPPOSITE side, and a lit torch powers every adjacent cell
+    except its support plus the cell above.
+
+    Returns (placements, footprint) where placements is [(x,y,z,block)] and
+    footprint is the set of (x,z) columns the tower occupies.
+    """
+    assert (y_top - y_bot) % 2 == 0, "down tower needs an even Y span"
+    p = []
+    bx, bz = ax + 1, az + 1
+    y = y_top
+    while y > y_bot:
+        p.append((ax, y - 1, az, S))              # support under the A dust
+        p.append((ax + 1, y - 1, az, TORCH_E))    # support = A block (to its west)
+        p.append((bx, y - 2, bz, S))              # support under partner dust
+        p.append((bx, y - 1, bz, W))              # partner dust, lit by torch 1
+        p.append((ax, y - 2, az + 1, TORCH_W))    # support = partner block (east)
+        if y - 3 >= y_bot - 1:
+            p.append((ax, y - 3, az, S))          # support for the next A dust
+        p.append((ax, y - 2, az, W))              # back in column A, 2 lower
+        y -= 2
+    return p, {(ax, az), (ax + 1, az), (bx, bz), (ax, az + 1)}
+
+
 def drop_cells_west(x, z, y_top, y0):
     """-x staircase descent from (x,y_top) to (x_out,y0), x_out < x. Mirror of
     drop_cells. Used for SINK vias so the descent lands WEST of the sink pin
