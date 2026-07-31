@@ -74,13 +74,33 @@ class DeliveryBox:
         H = self.drop
         interior = {}
 
-        # descending dust: one cell east per level down, each on its own support
+        # Descending dust: one cell east per level down, each on its own support.
+        # The FIRST interior cell is a repeater, and another goes in every 12 levels:
+        # the signal arriving from the trunk has already decayed over a long leg
+        # (measured: it reached the box at 1-3), and a staircase loses one more per
+        # level, so without re-driving at the entrance the box delivers nothing.
+        # A repeater facing west reads its west neighbour, which is the direction of
+        # travel here.
+        # A repeater must have its input and output on the SAME level, so it cannot
+        # sit on a descending step — that was a known break earlier in this project
+        # ("never put a repeater on a corner"). Refreshes therefore go on FLAT
+        # landings: descend a few levels, run one cell level to host the repeater,
+        # then carry on down. A landing right at the entrance re-drives the signal,
+        # which arrives already decayed from the long trunk leg (measured at 1-3).
+        REP_W = "minecraft:repeater[facing=west,delay=1]"
+        RUN = 10                                      # levels between landings
         x, y = ax, ay
-        interior[(x, y, az)] = W                      # the `in` cell
+        interior[(x, y, az)] = W                      # the `in` cell (dust)
+        since = 0
         for _ in range(H):
             x += 1
             y -= 1
             interior[(x, y, az)] = W
+            since += 1
+            if since >= RUN:
+                x += 1
+                interior[(x, y, az)] = REP_W          # flat landing, same level
+                since = 0
         self.in_cell = (ax, ay, az)
         self.out_cell = (x, y, az)
 
@@ -107,9 +127,17 @@ class DeliveryBox:
                     if inside:
                         continue
                     shell[(sx, sy, sz)] = S
-        # open the two interface faces so the trunk and the feed run can connect
-        shell.pop((self.in_cell[0] - 1, self.in_cell[1], self.in_cell[2]), None)
-        shell.pop((self.out_cell[0] + 1, self.out_cell[1], self.out_cell[2]), None)
+        # Open the interface faces. The trunk reaches the box along Z (it runs on a
+        # row beyond the field and drops down the box's column), so the `in` face
+        # must be open on BOTH z sides as well as the west — closing them made the
+        # shell cut the very leg that feeds the box. The `out` face opens east,
+        # towards the pin.
+        ic, oc = self.in_cell, self.out_cell
+        for opening in ((ic[0] - 1, ic[1], ic[2]),
+                        (ic[0], ic[1], ic[2] - 1),
+                        (ic[0], ic[1], ic[2] + 1),
+                        (oc[0] + 1, oc[1], oc[2])):
+            shell.pop(opening, None)
 
         self.blocks = {}
         self.blocks.update(shell)
@@ -135,3 +163,123 @@ def box_for_sink(pin_xz, trunk_y, base_y, gap=2):
     out_x = px - gap
     anchor = (out_x - drop, trunk_y, pz)
     return DeliveryBox(anchor=anchor, drop=drop)
+
+
+# ---------------------------------------------------------------------------
+# Two delivery modules, ONE contract
+# ---------------------------------------------------------------------------
+# Both expose (blocks, in_cell, out_cell, extent, cells()), so the router picks
+# between them purely on fit and cost — it never needs to know how either works.
+#
+#   STAIRS  simple and unconditionally non-inverting, but loses one signal level
+#           per level dropped, so it only suits shallow drops.
+#   TOWER   regenerates at every rung, so depth costs nothing electrically, but it
+#           inverts (measured: consistently, once fed sideways from a trunk), so a
+#           compensating inverter is built into the module.
+#
+# Verified separately; the shell means a sealed verification carries over.
+
+STAIRS_MAX_DROP = 8          # measured: drop<=8 delivers, drop=12 arrives at 0
+
+
+@dataclass
+class TowerBox:
+    """Shielded DOWN-tower delivery with the compensating inverter inside.
+
+    Depth-independent: every rung re-drives the signal, so a deep trunk costs
+    nothing in strength — the property the staircase lacks. The inversion the tower
+    introduces is cancelled by an inverter placed inside the same shell, so the
+    module as a whole is non-inverting and the router sees the same contract as the
+    staircase version.
+    """
+    anchor: Pos                     # the `in` cell (top of the shaft)
+    drop: int
+    blocks: Dict[Pos, str] = field(default_factory=dict)
+    in_cell: Pos = (0, 0, 0)
+    out_cell: Pos = (0, 0, 0)
+    extent: Tuple[Pos, Pos] = ((0, 0, 0), (0, 0, 0))
+
+    def __post_init__(self):
+        from via_gadget import down_tower_cells_dir, inverter_cells
+        ax, ay, az = self.anchor
+        H = self.drop
+        body: Dict[Pos, str] = {}
+
+        # the tower needs an even span; step down one plain level when it is odd
+        top = ay
+        body[(ax, ay, az)] = W
+        if (top - (ay - H)) % 2:
+            body[(ax, top - 1, az)] = W
+            body[(ax, top - 2, az)] = S
+            top -= 1
+        y_bot = ay - H
+        cells, _foot = down_tower_cells_dir(ax, az, top, y_bot,
+                                            side=(1, 0), arm=(0, 1))
+        for (x, y, z, b) in cells:
+            body[(x, y, z)] = b
+        # the tower's own output dust sits in the shaft column at y_bot
+        tower_out_x = ax
+        # dust lead (so the inverter's input block is fed by dust only), then the
+        # inverter, whose output is this module's `out`
+        lead_from = max(x for (x, y, _z, _b) in cells if y == y_bot) + 1
+        for i in range(2):
+            body[(lead_from + i, y_bot, az)] = W
+            body[(lead_from + i, y_bot - 1, az)] = S
+        icells, iout = inverter_cells(lead_from + 1, y_bot, az, direction=(1, 0))
+        for (x, y, z, b) in icells:
+            body[(x, y, z)] = b
+            body[(x, y - 1, z)] = S
+        self.in_cell = (ax, ay, az)
+        self.out_cell = iout
+
+        xs = [p[0] for p in body]; ys = [p[1] for p in body]; zs = [p[2] for p in body]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        z0, z1 = min(zs), max(zs)
+        shell = {}
+        for sx in range(x0 - 1, x1 + 2):
+            for sy in range(y0 - 1, y1 + 2):
+                for sz in range(z0 - 1, z1 + 2):
+                    if x0 <= sx <= x1 and y0 <= sy <= y1 and z0 <= sz <= z1:
+                        continue
+                    shell[(sx, sy, sz)] = S
+        ic, oc = self.in_cell, self.out_cell
+        for opening in ((ic[0] - 1, ic[1], ic[2]),
+                        (ic[0], ic[1], ic[2] - 1),
+                        (ic[0], ic[1], ic[2] + 1),
+                        (oc[0] + 1, oc[1], oc[2])):
+            shell.pop(opening, None)
+
+        self.blocks = {}
+        self.blocks.update(shell)
+        self.blocks.update(body)
+        self.extent = ((x0 - 1, y0 - 1, z0 - 1), (x1 + 1, y1 + 1, z1 + 1))
+
+    def cells(self):
+        (x0, _y0, z0), (x1, _y1, z1) = self.extent
+        return {(x, z) for x in range(x0, x1 + 1) for z in range(z0, z1 + 1)}
+
+    def volume(self):
+        (x0, y0, z0), (x1, y1, z1) = self.extent
+        return (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1)
+
+
+def delivery_for_sink(pin_xz, trunk_y, base_y, gap=2, prefer=None):
+    """Pick a delivery module for this sink.
+
+    Shallow drops take the staircase (simplest, no inversion to cancel); deeper
+    ones take the tower, which does not attenuate. `prefer` forces a kind, which is
+    what lets the router retry with the other one when the first does not fit.
+    """
+    px, pz = pin_xz
+    drop = trunk_y - base_y
+    kind = prefer or ("stairs" if drop <= STAIRS_MAX_DROP else "tower")
+    if kind == "stairs":
+        out_x = px - gap
+        return DeliveryBox(anchor=(out_x - drop, trunk_y, pz), drop=drop), "stairs"
+    # the tower's out sits a fixed number of columns east of its shaft; place the
+    # shaft far enough west that `out` lands gap cells before the pin
+    probe = TowerBox(anchor=(0, trunk_y, pz), drop=drop)
+    span = probe.out_cell[0] - probe.in_cell[0]
+    shaft_x = px - gap - span
+    return TowerBox(anchor=(shaft_x, trunk_y, pz), drop=drop), "tower"

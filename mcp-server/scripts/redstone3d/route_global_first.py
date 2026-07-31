@@ -28,6 +28,7 @@ from via_gadget import (up_tower_cells, trunk_cells, down_tower_cells_dir,
                         inverter_cells)
 from route_buildable import BuildableRouter
 from reserve import ReserveMap, reservation_from_cells
+from delivery_box import box_for_sink
 
 Pos = Tuple[int, int, int]
 XZ = Tuple[int, int]
@@ -69,6 +70,9 @@ class GlobalFirstRouter:
         # torch energises this tower's support block and holds its last rung dark
         # (measured on n4 — 15 at y=2, 0 at y=0). A clear ring is required.
         self.tower_cols: Dict[XZ, str] = {}
+        # (x,z) -> net for every column a DeliveryBox occupies; boxes are
+        # shielded, so they only need to not overlap each other.
+        self.box_cols: Dict[XZ, str] = {}
         self.pin_xz: Dict[XZ, str] = {}
         for n, p in placement.net_sources.items():
             self.pin_xz[(p[0], p[2])] = n
@@ -164,117 +168,55 @@ class GlobalFirstRouter:
 
         # ---- each sink: come off the row on its own column, drop into the pin
         for k in sinks:
-            # The verified DOWN-tower rotations all place their partner column one
-            # step EAST of the shaft, and east of the feed cell is the pin itself,
-            # so the tower cannot land directly on the feed. Drop it one column
-            # further west and bridge east with a single y0 dust.
-            # Shaft at k-3 so the tower's torch column (one east of the shaft,
-            # k-2) stays clear of the feed cell at k-1. With the shaft at k-2 the
-            # torch column WAS the feed column, and the rungs' output fought the
-            # feed dust — every global link read 0.
-            # Delivery layout, fixed by the sealed stage tests (test_sealed):
-            #   shaft ... dust lead ... inverter(block,torch,out) ... run ... feed
-            # The tower INVERTS when the signal enters its top sideways from the
-            # trunk (single-stage tests that drove the top directly showed it as
-            # non-inverting, which is what produced the earlier contradictory
-            # readings), so exactly one inverter is inserted to cancel that.
-            # Budget west of the pin: feed at k-1, inverter output k-2, torch k-3,
-            # block k-4, dust lead k-5..k-6, shaft k-7.
-            # Column budget west of the pin (measured from the gadget output):
-            #   shaft fx, tower's last torch fx+1, dust lead 2, inverter 3
-            #   (block/torch/out), then the run into the feed at k-1.
-            LEAD = 2
-            fx, fz = k[0] - 9, k[2]
-            feed_cell = (k[0] - 1, k[2])
-            if any(c in self.cell_xz or c in self.pin_xz
-                   for c in ((fx, fz), feed_cell)):
-                return False
-            # leg down the sink's column from the trunk row to the sink's z
-            self._leg(put, fx, row, fz, res)
-            # parity bridge then the 2x2 down tower
-            # Parity bridge to an even span, then stop the tower TWO levels above
-            # the floor: its last cycle would otherwise place a wall torch at
-            # y=base_y, where the floor slab and the feed dust overwrite it. That
-            # lost torch made the count odd (7 instead of 8), so the tower
-            # inverted and every sink read a constant high on drive=0.
-            dn_from = self.trunk_y
-            if (dn_from - self.base_y) % 2:
-                put((fx, dn_from - 2, fz), S)
-                put((fx, dn_from - 1, fz), W)
-                dn_from -= 1
-            placed = False
-            # Rotations proven in test_down_dirs (side=(1,0) family only).
-            for arm, side in (((0, 1), (1, 0)), ((0, -1), (1, 0)),
-                              ((1, 0), (0, 1)), ((1, 0), (0, -1))):
-                foot = {(fx, fz),
-                        (fx + arm[0], fz + arm[1]),
-                        (fx + side[0], fz + side[1]),
-                        (fx + arm[0] + side[0], fz + arm[1] + side[1])}
-                if any(c in self.cell_xz or c in self.pin_xz for c in foot):
+            # SINK DELIVERY = pack a shielded DeliveryBox (delivery_box.py).
+            #
+            # The previous version wired a 2x2 torch tower, a parity bridge and a
+            # compensating inverter by hand. Its behaviour depended on seven things
+            # at once (rotation, torch parity, entry direction, neighbouring towers,
+            # the pin's west-only input, and sharing the y0 plane with local
+            # routing), so each fix invalidated another assumption and a sealed pass
+            # never implied a pass inside a module.
+            #
+            # The box replaces all of that with one contract: an `in` cell fed by
+            # the trunk, an `out` cell that drives the pin's feed, and a stone shell
+            # that makes outside interference physically impossible. Its interior is
+            # a see-below staircase, which is unconditionally non-inverting — the
+            # polarity question disappears rather than being compensated. Verified
+            # with hostile geometry pressed against the shell (test_delivery_box).
+            #
+            # The router's only remaining job here is packing.
+            box = None
+            for gap in (2, 3, 4, 5, 6):
+                cand = box_for_sink((k[0], k[2]), self.trunk_y, self.base_y,
+                                    gap=gap)
+                cols = cand.cells()
+                if any(c in self.cell_xz or c in self.pin_xz for c in cols):
                     continue
-                # A tower occupies two z rows, so two sinks three rows apart put
-                # their towers side by side and the neighbour's torch energises
-                # this tower's support block, holding its last rung dark. Measured
-                # on n4: its shaft at z=0 sat next to another tower at z=2 and the
-                # delivery read 15 at y=2 and 0 at y=0. Require a clear ring around
-                # the whole footprint, not merely unoccupied footprint cells.
-                ring = {(cx + dx, cz + dz) for (cx, cz) in foot
-                        for dx in (-1, 0, 1) for dz in (-1, 0, 1)}
-                if any(self.tower_cols.get(c) not in (None, net) for c in ring):
+                if any(self.box_cols.get(c) not in (None, net) for c in cols):
                     continue
-                # Land the tower directly on the base plane, exactly as the
-                # end-to-end reference (test_trunk_e2e) does. An earlier attempt
-                # stopped two levels short and bridged down with a staircase,
-                # on the theory that the last torch was buried by the floor slab;
-                # the reference proves otherwise and the detour broke the link.
-                dn, _ = down_tower_cells_dir(fx, fz, dn_from, self.base_y,
-                                             side=side, arm=arm)
-                for (x, y, z, b) in dn:
-                    put((x, y, z), b)
-                # Never write over (fx, base_y): with these rotations the tower's
-                # last torch lands there, and replacing it with dust would drop the
-                # torch count by one and flip the polarity.
-                # Dust lead so the inverter's input block is fed by DUST only —
-                # feeding it straight off another solid block double-drives the
-                # input and pins the output high (measured in the sealed S4 test).
-                # The tower's own cells at y=base include a wall torch one column
-                # EAST of the shaft (its last rung). The dust lead must start
-                # beyond that, or it overwrites the torch — which is exactly what
-                # made n4 read 15 at y=2 and 0 at y=0.
-                tower_base_cols = {x for (x, y, _z, _b) in dn if y == self.base_y}
-                lead_from = max([fx] + sorted(tower_base_cols)) + 1
-                for i in range(LEAD):
-                    put((lead_from + i, self.base_y, fz), W)
-                inv_at = lead_from + LEAD - 1
-                icells, iout = inverter_cells(inv_at, self.base_y, fz,
-                                              direction=(1, 0))
-                res.rmap.reserve(reservation_from_cells(
-                    f"{net}:sink@{k[0]},{k[2]}:inverter", icells, "I1 inverter"))
-                for (ix, iy, iz2, ib) in icells:
-                    put((ix, iy, iz2), ib)
-                # run east from the inverter's output into the pin's feed cell
-                for xx in range(iout[0] + 1, feed_cell[0] + 1):
-                    put((xx, self.base_y, fz), W)
-                # Reserve EVERY column the tower occupies, not just its footprint
-                # corners. The tower's last torch sits in the shaft column at
-                # y=base, and the per-zone local routing — which emits the whole
-                # base plane — was overwriting it with dust; the tower then read 15
-                # at y=2 and 0 at y=0 (diagnosed on n4).
-                # Register the gadget's exact expected layout so any later write
-                # into these cells is caught (and blocked) instead of silently
-                # flipping the delivery's polarity.
-                res.rmap.reserve(reservation_from_cells(
-                    f"{net}:sink@{k[0]},{k[2]}:tower", dn, "2x2 down tower"))
-                for (tx2, _ty2, tz2, _tb2) in dn:
-                    self.tower_cols[(tx2, tz2)] = net
-                res.reserved.update({(x, z) for (x, _y, z, _b) in dn})
-                res.reserved.update(foot | {feed_cell})
-                res.reserved.update({(fx + i, fz) for i in range(1, LEAD + 1)})
-                res.reserved.update({(ix, iz2) for (ix, _iy, iz2, _ib) in icells})
-                placed = True
+                box = cand
                 break
-            if not placed:
+            if box is None:
                 return False
+
+            # bring the trunk to the box's `in` cell, then emit the box
+            ix, iy, iz = box.in_cell
+            self._leg(put, ix, row, iz, res)
+            for (bx, by, bz), bb in box.blocks.items():
+                put((bx, by, bz), bb)
+            res.rmap.reserve(reservation_from_cells(
+                f"{net}:sink@{k[0]},{k[2]}:box",
+                [(bx, by, bz, bb) for (bx, by, bz), bb in box.blocks.items()],
+                "shielded delivery box"))
+            for c in box.cells():
+                self.box_cols[c] = net
+                res.reserved.add(c)
+
+            # run east from the box's `out` cell into the pin's feed cell
+            ox, oy, oz = box.out_cell
+            for xx in range(ox + 1, k[0]):
+                put((xx, self.base_y, oz), W)
+                res.reserved.add((xx, oz))
         res.wire_count = sum(1 for b in res.blocks.values() if b == W)
         return True
 
