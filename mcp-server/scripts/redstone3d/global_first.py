@@ -43,7 +43,10 @@ class ClusterPlan:
 class GlobalFirstPlanner:
     """Plan trunks for global nets, then compute each cluster's preferred x."""
 
-    TRACK_PITCH = 2      # centre-to-centre spacing inside a layer (0 shorts)
+    # Measured (test_trunk_e2e pitch sweep): pitch 2 is NOT usable because the
+    # 2x2 DOWN tower at a corridor's end reaches into the neighbouring row and
+    # kills it; 3 is the smallest isolated spacing.
+    TRACK_PITCH = 3      # centre-to-centre spacing inside a layer
     LAYER_PITCH = 4      # Y between cross layers (even torch count for towers)
 
     def __init__(self, placement, zone_width: int = 64):

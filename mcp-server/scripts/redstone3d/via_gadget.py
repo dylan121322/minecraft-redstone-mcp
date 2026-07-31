@@ -146,6 +146,64 @@ def down_tower_cells_dir(ax, az, y_top, y_bot, side=(0, 1), arm=(1, 0)):
     return p, {(ax, az), t1, t2, (px, pz)}
 
 
+TORCH_STAND = "minecraft:redstone_torch"
+
+
+def up_tower_cells(ax, az, y_bot, y_top, feed_dir=(-1, 0)):
+    """VERIFIED 1x1 UP tower (test_via_tower / test_rise_aligned): a standing-torch
+    ladder that climbs y_bot -> y_top in a single column, non-inverting when the
+    torch count is even, and regenerating (no decay) at any height.
+
+    (y_top - y_bot) must be even; torches = (y_top - y_bot) / 2, which must itself
+    be even for a non-inverting transfer — i.e. the span is a multiple of 4.
+
+    The caller must drive the base block from `feed_dir` with a repeater facing
+    that direction (a dust merely touching the base is too weak). Returns
+    (placements, footprint) with the top dust at (ax, y_top + 1, az).
+    """
+    span = y_top - y_bot
+    assert span % 2 == 0, "up tower needs an even Y span"
+    n = span // 2
+    p = []
+    y = y_bot
+    for _ in range(n):
+        p.append((ax, y, az, S))                  # block
+        p.append((ax, y + 1, az, TORCH_STAND))    # standing torch (inverts)
+        y += 2
+    p.append((ax, y, az, S))                      # top block
+    p.append((ax, y + 1, az, W))                  # readable dust above it
+    return p, {(ax, az)}
+
+
+def trunk_cells(z, x_from, x_to, y, refresh=12):
+    """A straight E-W trunk corridor at (y) along row z, with a refresh repeater
+    every `refresh` cells. Corridors on one layer are spaced 2 apart by the
+    caller, which makes adjacency shorts structurally impossible.
+
+    Direction is +x when x_to > x_from. A repeater reads the side it faces, so
+    travelling +x needs facing=west (verified in test_rep_facing). Being a
+    straight line, there is no corner ambiguity — the failure mode that killed the
+    earlier free-form cross routing.
+    """
+    step = 1 if x_to >= x_from else -1
+    facing = "west" if step == 1 else "east"
+    p = []
+    run = 0
+    x = x_from
+    while True:
+        p.append((x, y - 1, z, S))                # support
+        run += 1
+        if run >= refresh and x != x_to:
+            p.append((x, y, z, f"minecraft:repeater[facing={facing},delay=1]"))
+            run = 0
+        else:
+            p.append((x, y, z, W))
+        if x == x_to:
+            break
+        x += step
+    return p, {(xx, z) for xx in range(min(x_from, x_to), max(x_from, x_to) + 1)}
+
+
 def down_tower_cells(ax, az, y_top, y_bot):
     """VERIFIED bidirectional-tower DOWN leg (test_tower_bidir: all depths OK,
     non-inverting, full strength at the bottom, no decay).
