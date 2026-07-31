@@ -539,6 +539,23 @@ class BuildableRouter:
                 p.append(("dust", x, cy_cross+1, z))
             oc[(x, z)] = net; self.support1[(x, z)] = net
             climbed[net].add((x, z))
+        # Refresh before the descent: the signal reaches the staircase already
+        # attenuated by the cross run (measured on n6: 14 at the tower top, 3 at
+        # the end of a 13-cell cross run) and each descent step costs one more, so
+        # it died two cells down. Insert the repeater on the SECOND-TO-LAST cross
+        # cell — placing it on the last one aimed its output along the cross
+        # direction while the path actually turns downward there, which broke more
+        # nets than it fixed.
+        if len(path) >= 3:
+            rc = path[-2]
+            came = (rc[0]-path[-3][0], rc[1]-path[-3][1])
+            leave = (path[-1][0]-rc[0], path[-1][1]-rc[1])
+            f = FLOW_FACING.get(came)
+            if f and came == leave:      # straight only
+                p = [q for q in p if not (q[0] == "dust" and q[1] == rc[0]
+                                          and q[2] == cy_cross+1 and q[3] == rc[1])]
+                p.append(("rep", rc[0], cy_cross+1, rc[1], f))
+
         # emit the staircase along the chosen corridor
         cyy = cy_cross + 1
         for (cx, cz) in cells:
