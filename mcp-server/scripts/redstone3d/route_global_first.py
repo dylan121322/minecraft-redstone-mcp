@@ -247,7 +247,14 @@ class GlobalFirstRouter:
         for (bx, _by, bz) in tb.blocks:
             res.reserved.add((bx, bz))
 
-        # each sink: a delivery box hung off the trunk's row
+        # each sink: a delivery box hung off the trunk's row.
+        # prev_sink_cells tracks THIS net's earlier sinks' placed cells. Two of
+        # this net's sinks' segments beside each other short in MC just like
+        # foreign nets do (measured: n2's sink3 feed at (173,0,0) read 14 with
+        # its source cut, driven by sink4's stair out at (173,0,-1) one cell
+        # away). box_vox is keyed by net only, so it cannot distinguish this
+        # net's own sinks — this set does.
+        prev_sink_cells: Set[Pos] = set()
         for k in sinks:
             box = None
             for gap in (2, 3, 4, 5, 6):
@@ -267,6 +274,17 @@ class GlobalFirstRouter:
                     # on its OWN trunk's shell because the transactional emit
                     # kept the trunk out of res.blocks during box selection).
                     if any(c in res.blocks for c in cand.blocks):
+                        continue
+                    # This net's OWN earlier sinks' segments: same-net adjacency
+                    # is still a real MC short (different signal paths), unlike
+                    # the trunk which is the same path and legally touches the
+                    # box. Reject overlap AND 8-neighbourhood.
+                    if any(c in prev_sink_cells for c in cand.blocks):
+                        continue
+                    if any(any((c[0]+_dx, c[1], c[2]+_dz) in prev_sink_cells
+                               for _dx, _dz in ((1,0),(-1,0),(0,1),(0,-1),
+                                                (1,1),(1,-1),(-1,1),(-1,-1)))
+                           for c in cand.blocks):
                         continue
                     box = cand
                     box_dz = dz
@@ -344,6 +362,7 @@ class GlobalFirstRouter:
             for (bx, by, bz), bb in box.blocks.items():
                 put((bx, by, bz), bb)
                 put_blocks.append((bx, by, bz, bb))
+                prev_sink_cells.add((bx, by, bz))
             res.rmap.reserve(reservation_from_cells(
                 f"{net}:sink@{k[0]},{k[2]}:box",
                 put_blocks,
@@ -381,11 +400,13 @@ class GlobalFirstRouter:
                     if _o is not None and _o != net:
                         return False
                 put((xx, base, bz2), W)
+                prev_sink_cells.add((xx, base, bz2))
                 res.reserved.add((xx, bz2))
             if bz2 != k[2]:
                 zstep = 1 if k[2] > bz2 else -1
                 for zz in range(bz2 + zstep, k[2] + zstep, zstep):
                     put((k[0] - 1, base, zz), W)
+                    prev_sink_cells.add((k[0] - 1, base, zz))
                     res.reserved.add((k[0] - 1, zz))
 
         res.wire_count = sum(1 for b in res.blocks.values() if b == W)
