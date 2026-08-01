@@ -340,9 +340,12 @@ class GlobalFirstRouter:
                 # leg wire, 17 audit violations). Walk the leg on the first free
                 # column near ix instead, then jog back at the bottom.
                 lx = ix
-                for cand in range(ix, ix + 4):
-                    if self.box_vox.get((cand, ty, oz)) in (None, net) and \
-                       (cand, ty, oz) not in res.blocks:
+                zlo, zhi = sorted((oz, iz))
+                for cand in range(ix, ix + 8):
+                    if all(self.box_vox.get((cand, ty, z)) in (None, net)
+                           for z in range(zlo, zhi + 1)) and \
+                       all((cand, ty, z) not in res.blocks
+                           for z in range(zlo, zhi + 1)):
                         lx = cand
                         break
                 self._leg(put, lx, oz, iz, res, net=net, ty=ty)
