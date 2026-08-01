@@ -364,15 +364,20 @@ class GlobalFirstRouter:
             # then occupies. An L-jog west then south puts a wire at (ix-1, iz)
             # connected to the leg (measured: n4's stairs in read an empty
             # (213,5,19) and the whole delivery stayed dark).
-            if (ix - 1, iz) not in res.blocks and \
-               self.box_vox.get((ix - 1, ty, iz)) in (None, net):
+            if self.box_vox.get((ix - 1, ty, iz)) in (None, net):
                 if iz + 1 <= self.z1 + 1:
                     # full L: (ix, iz+1) is the leg's last wire (the leg walks
                     # DOWN toward iz), jog west then south so the wire at
                     # (ix-1, iz) is fed by the leg
                     for jx, jz in ((ix - 1, iz + 1), (ix - 1, iz)):
-                        if (jx, ty, jz) in res.blocks:
-                            return False   # L-jog would overwrite a foreign shell
+                        # Only a FOREIGN interior blocks the L-jog. This net's own
+                        # trunk shell at the corner is a legitimate cell to
+                        # overwrite — the corner is the only way the leg feeds
+                        # the box's west-facing input (measured: n3's corner
+                        # (32,21,16) sat on its own trunk shell, the L-jog
+                        # returned False, and the whole delivery stayed dark).
+                        if self.box_vox.get((jx, ty, jz)) not in (None, net):
+                            return False
                         put((jx, ty - 1, jz), S)
                         put((jx, ty, jz), W)
                         self.box_vox[(jx, ty, jz)] = net
