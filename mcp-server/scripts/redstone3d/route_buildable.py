@@ -471,6 +471,20 @@ class BuildableRouter:
             gv = self.global_vox.get(q)
             if gv is not None:
                 return False
+        # A cross wire at cy is dust at cy+1. ANOTHER net's DESCEND rung can sit
+        # on the same height from a higher cross layer (cy=8 descends through
+        # y=5 beside a cy=4 cross wire) — measured on Control: n3's descend rung
+        # (17,5,71) sat next to n4's cross (17,5,72) and shorted, because each
+        # check only saw its own layer. owner3d sees every conducting voxel, so
+        # check the dust height's 8-neighbourhood there.
+        dy = cy + 1
+        o = self.owner3d.get((xz[0], dy, xz[1]))
+        if o is not None and o != net:
+            return False
+        for dx, dz in _PLANE_SHELL:
+            o = self.owner3d.get((xz[0] + dx, dy, xz[1] + dz))
+            if o is not None and o != net:
+                return False
         return True
 
     def _y2_bfs(self, sources, goal, net, cy):
@@ -1026,6 +1040,16 @@ class BuildableRouter:
                 o = self.owner3d.get((xz[0], y, xz[1]))
                 if o is not None and o != net:
                     return True
+                # Horizontal 8-neighbourhood on each intermediate layer: a
+                # descent rung beside ANOTHER net's cross wire shorts it (MC
+                # dust couples on the same layer) — measured on Control: n3's
+                # descend rung at (17,5,71) sat next to n4's cross at
+                # (17,5,72) and produced 5 shorts, because the check only
+                # looked down its own column.
+                for dx, dz in _PLANE_SHELL:
+                    o = self.owner3d.get((xz[0] + dx, y, xz[1] + dz))
+                    if o is not None and o != net:
+                        return True
         return False
 
     def _materialize(self, nets, placements, bridges):
