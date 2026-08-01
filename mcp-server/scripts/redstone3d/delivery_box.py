@@ -88,7 +88,8 @@ class DeliveryBox:
         # landings: descend a few levels, run one cell level to host the repeater,
         # then carry on down. A landing right at the entrance re-drives the signal,
         # which arrives already decayed from the long trunk leg (measured at 1-3).
-        REP_W = "minecraft:repeater[facing=west,delay=1]"
+        REP_W = ("minecraft:repeater[facing=west,delay=1]" if self.direction == 1
+                 else "minecraft:repeater[facing=east,delay=1]")
         RUN = 10                                      # levels between landings
         x, y = ax, ay
         # `in` is a west-facing REPEATER, not dust: a bare dust input couples to
@@ -96,7 +97,9 @@ class DeliveryBox:
         # OUTPUT lands one cell EAST at the same height — that cell must be dust,
         # and the first descending step starts below it. Without this landing the
         # repeater drove empty air and the staircase never saw the signal.
-        interior[(x, y, az)] = "minecraft:repeater[facing=west,delay=1]"
+        interior[(x, y, az)] = ("minecraft:repeater[facing=west,delay=1]"
+                              if self.direction == 1 else
+                              "minecraft:repeater[facing=east,delay=1]")
         x += self.direction
         interior[(x, y, az)] = W          # the repeater's output landing
         since = 0
