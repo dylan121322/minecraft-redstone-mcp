@@ -452,22 +452,37 @@ class BuildableRouter:
         return True
 
     def _y2_bfs(self, sources, goal, net, cy):
-        prev = {}; seen = set(sources); q = deque(sources)
-        while q:
-            cur = q.popleft()
+        # Weighted BFS: a z-move costs 1, an x-move costs X_PEN. The unweighted
+        # BFS found whichever path came first, and on this layout that was an L
+        # with a LONG x-vertical leg (n18's cross ran east along z=22 to x=67,
+        # then south along x=67 to z=57 — and x=67 is EVERY sink's west feed
+        # column, so the leg occupied n24's feed (67,40) and blocked its
+        # down-tower at every height). Preferring z-moves keeps the long leg in
+        # the SOURCE's column, leaving only a short x-run at the goal.
+        import heapq
+        X_PEN = 6.0
+        dist = {c: 0.0 for c in sources}
+        prev: Dict[XZ, XZ] = {}
+        pq = [(0.0, c) for c in sources]
+        heapq.heapify(pq)
+        while pq:
+            d, cur = heapq.heappop(pq)
             if cur == goal:
                 path = [cur]
                 while path[-1] in prev:
                     path.append(prev[path[-1]])
                 path.reverse()
                 return path
+            if d > dist.get(cur, float("inf")):
+                continue
             for dx, dz in _H:
                 nx = (cur[0]+dx, cur[1]+dz)
-                if nx in seen:
-                    continue
                 if nx != goal and not self._y2_free(nx, net, cy):
                     continue
-                seen.add(nx); prev[nx] = cur; q.append(nx)
+                nd = d + (X_PEN if dx else 1.0)
+                if nd < dist.get(nx, float("inf")):
+                    dist[nx] = nd; prev[nx] = cur
+                    heapq.heappush(pq, (nd, nx))
         return None
 
     def _bridge(self, net, goal_xz, placements, climbed):

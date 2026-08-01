@@ -170,9 +170,29 @@ class GlobalFirstRouter:
             if all(self.box_vox.get(c) in (None, net) for c in cells):
                 climb_x = cand
                 break
+        # LEG column: pick the first column east of the climb whose ENTIRE
+        # vertical span (from the source's z to the corridor row) is free of
+        # gate bodies. The climb column runs through the source's own gate row
+        # and every row between it and the corridor (measured on Control: n16's
+        # leg along x=24 hit gate bodies at z=53-55, 72-74, 91-93), so the leg
+        # must jig to a gate-free column first.
+        leg_x = -1
+        z0l, z1l = sorted((src[2], row))
+        for cand in range(src[0] + 2, src[0] + 26):
+            if cand == climb_x:
+                continue
+            cols = [(cand, z) for z in range(z0l, z1l + 1)]
+            if any(c in self.cell_xz or c in self.pin_xz for c in cols):
+                continue
+            if any(self.box_vox.get((cand, y, z)) not in (None, net)
+                   for z in range(z0l, z1l + 1) for y in range(base + 1, ty + 1)):
+                continue
+            leg_x = cand
+            break
         try:
             tb = TrunkBox(src_cell=(src[0], base, src[2]), plane=ty,
-                          run_to_x=run_to, leg_to_z=row, climb_x=climb_x)
+                          run_to_x=run_to, leg_to_z=row, climb_x=climb_x,
+                          leg_x=leg_x)
         except AssertionError:
             return False
         # The box's shell inevitably passes over the PI column and the first gate

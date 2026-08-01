@@ -55,6 +55,10 @@ class TrunkBox:
     leg_to_z: int            # which z the leg ends on (the sink's row)
     climb_x: int = -1        # optional explicit climb column (router-assigned to
                              # dodge other nets' ladders/legs); -1 = auto by sz
+    leg_x: int = -1          # optional explicit LEG column: the vertical leg
+                             # walks HERE instead of in the climb column, so it
+                             # can dodge the gate rows the climb column crosses.
+                             # -1 = leg stays in the climb column
     blocks: Dict[Pos, str] = field(default_factory=dict)
     in_cell: Pos = (0, 0, 0)
     out_cell: Pos = (0, 0, 0)
@@ -96,19 +100,36 @@ class TrunkBox:
         # collision every time. Turning onto the corridor row first keeps the long
         # horizontal stretch inside the reserved corridor, which is gate-free by
         # construction, and leaves only the 3-cell climb on the source's row.
+        # Vertical leg column: the climb column crosses the source's own gate
+        # row AND every other gate row between it and the corridor (measured on
+        # Control: n16's leg along x=24 hit gate bodies at z=53-55, 72-74, 91-93).
+        # When the router assigns leg_x, walk horizontally to it FIRST (on the
+        # source's row), then vertically in a gate-free column.
+        leg_x = self.leg_x if self.leg_x >= 0 else cx
         step = 1 if self.leg_to_z >= sz else -1
         facing = "north" if step == 1 else "south"   # measured: travel +z -> north
         run = 0
+        # horizontal jog from the climb column to leg_x (on the source's row)
+        while cx < leg_x:
+            cx += 1
+            body[(cx, self.plane - 1, sz)] = S
+            run += 1
+            if run >= REFRESH:
+                body[(cx, self.plane, sz)] = _rep("west")
+                run = 0
+            else:
+                body[(cx, self.plane, sz)] = W
+        # vertical leg in the (gate-free) leg column
         z = sz
         while z != self.leg_to_z:
             z += step
-            body[(cx, self.plane - 1, z)] = S
+            body[(leg_x, self.plane - 1, z)] = S
             run += 1
             if run >= REFRESH and z != self.leg_to_z:
-                body[(cx, self.plane, z)] = _rep(facing)
+                body[(leg_x, self.plane, z)] = _rep(facing)
                 run = 0
             else:
-                body[(cx, self.plane, z)] = W
+                body[(leg_x, self.plane, z)] = W
         leg_z = self.leg_to_z
 
         # --- horizontal run east along the corridor row, refreshed.
@@ -116,7 +137,7 @@ class TrunkBox:
         # corner (its input and output axes differ), so the unrefreshed cells from
         # the leg must count toward the run's first refresh or the signal dies in
         # the corner (measured: 10 + 12 = 22 unrefreshed).
-        x = cx
+        x = leg_x
         while x < self.run_to_x:
             x += 1
             body[(x, self.plane - 1, leg_z)] = S
