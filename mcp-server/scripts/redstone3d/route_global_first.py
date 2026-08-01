@@ -152,7 +152,13 @@ class GlobalFirstRouter:
         ty = self.net_trunk_y[net]
         src = self.pl.net_sources[net]
         sinks = self.pl.net_sinks[net]
-        put = res.blocks.__setitem__
+        # Transactional emit: everything goes to a LOCAL dict first, merged into
+        # res.blocks only on success. A failure used to leave the trunk's blocks
+        # behind (they were put directly), and the NEXT net's delivery-box check
+        # then collided with the dead net's residue (measured: n7's box hit n3's
+        # abandoned trunk at (13,17,*) after n3 failed on a later sink).
+        local_blocks: Dict[Pos, str] = {}
+        put = local_blocks.__setitem__
         base = self.base_y
 
         # one TrunkBox per net, running east far enough to reach the westmost sink
@@ -167,7 +173,8 @@ class GlobalFirstRouter:
         climb_x = -1
         for cand in range(src[0] + 2, src[0] + 7):
             cells = [(cand, y, src[2]) for y in range(base + 1, ty + 1)]
-            if all(self.box_vox.get(c) in (None, net) for c in cells):
+            if all(self.box_vox.get(c) in (None, net) for c in cells) and \
+               all(c not in res.blocks for c in cells):
                 climb_x = cand
                 break
         # LEG column: pick the first column east of the climb whose ENTIRE
@@ -184,8 +191,10 @@ class GlobalFirstRouter:
             cols = [(cand, z) for z in range(z0l, z1l + 1)]
             if any(c in self.cell_xz or c in self.pin_xz for c in cols):
                 continue
-            if any(self.box_vox.get((cand, y, z)) not in (None, net)
-                   for z in range(z0l, z1l + 1) for y in range(base + 1, ty + 1)):
+            # The leg walks on THIS net's trunk plane only (y=ty); other nets'
+            # planes are isolated layers, so only same-plane conflicts matter.
+            if any(self.box_vox.get((cand, ty, z)) not in (None, net)
+                   for z in range(z0l, z1l + 1)):
                 continue
             leg_x = cand
             break
@@ -193,7 +202,8 @@ class GlobalFirstRouter:
             tb = TrunkBox(src_cell=(src[0], base, src[2]), plane=ty,
                           run_to_x=run_to, leg_to_z=row, climb_x=climb_x,
                           leg_x=leg_x)
-        except AssertionError:
+        except AssertionError as _ae:
+            print(f'  [{net}] TrunkBox ASSERT: {_ae}', flush=True)
             return False
         # The box's shell inevitably passes over the PI column and the first gate
         # column on its way out of the field. Rejecting the box for that would make
@@ -211,35 +221,59 @@ class GlobalFirstRouter:
                    and any((c[0], y, c[1]) in interior
                            for y in range(tb.extent[0][1], tb.extent[1][1] + 1))]
         if blocked:
+            print(f'  [{net}] trunk blocked={blocked[:3]}', flush=True)
             return False
         if any(self.box_vox.get(c) not in (None, net) for c in interior):
+            print(f'  [{net}] trunk voxconf', flush=True)
             return False
+        put_blocks = []
         for (bx, by, bz), bb in tb.blocks.items():
             if bb == S and ((bx, bz) in self.cell_xz or (bx, bz) in self.pin_xz):
                 continue                      # skip shell over pins / gate bodies
             put((bx, by, bz), bb)
+            put_blocks.append((bx, by, bz, bb))
         res.rmap.reserve(reservation_from_cells(
             f"{net}:trunk",
-            [(bx, by, bz, bb) for (bx, by, bz), bb in tb.blocks.items()],
+            put_blocks,
             "shielded trunk box"))
         for c in interior:
             self.box_vox[c] = net
-            res.reserved.add((c[0], c[2]))
+        # reserve EVERY column the box touches (shell included): the local
+        # router only sees the y0 projection of `reserved`, and it lays its own
+        # bridge towers up to y=9 — without the shell columns it would drive a
+        # tower straight through a global box's shell (measured: a local tower's
+        # wall_torch landed inside n13:sink@93,21:box and its rungs overwrote the
+        # box's shell stone).
+        for (bx, _by, bz) in tb.blocks:
+            res.reserved.add((bx, bz))
 
         # each sink: a delivery box hung off the trunk's row
         for k in sinks:
             box = None
             for gap in (2, 3, 4, 5, 6):
-                cand, _kind = delivery_for_sink((k[0], k[2]), ty, base, gap=gap)
+                for dz in (0, 1, -1, 2, -2):
+                    cand, _kind = delivery_for_sink((k[0], k[2]), ty, base,
+                                                    gap=gap, dz=dz)
                 cols = cand.cells()
                 if any(c in self.cell_xz or c in self.pin_xz for c in cols):
                     continue
                 dint = {c for (c, b) in cand.blocks.items() if b != S}
                 if any(self.box_vox.get(c) not in (None, net) for c in dint):
                     continue
+                # Block-level overlap with ALREADY PLACED global blocks: a later
+                # net's delivery shell is stone and invisible to box_vox (which
+                # only tracks interior), yet a neighbour's tower TORCH landing on
+                # that shell cell overwrites it in the emitted world (measured:
+                # n7's down-tower rung at (88,1,20) overwrote n13's sink-box
+                # shell stone — same cell, two boxes). Any shared cell is a real
+                # block collision, so reject the candidate outright.
+                if any(c in res.blocks for c in cand.blocks):
+                    continue
                 box = cand
+                box_dz = dz
                 break
             if box is None:
+                print(f'  [{net}] sink{k} no delivery box', flush=True)
                 return False
 
             # run along this net's row from the trunk's out to the box's in, then
@@ -247,32 +281,53 @@ class GlobalFirstRouter:
             ox, oy, oz = tb.out_cell
             ix, iy, iz = box.in_cell
             for x in range(min(ox, ix), max(ox, ix) + 1):
+                if self.box_vox.get((x, ty, oz)) not in (None, net):
+                    return False      # run would overwrite a foreign net's box
                 put((x, ty - 1, oz), S)
                 put((x, ty, oz), W)
+                self.box_vox[(x, ty, oz)] = net
                 res.reserved.add((x, oz))
             if iz != oz:
-                self._leg(put, ix, oz, iz, res, ty=ty)
+                self._leg(put, ix, oz, iz, res, net=net, ty=ty)
 
+            put_blocks = []
             for (bx, by, bz), bb in box.blocks.items():
                 put((bx, by, bz), bb)
+                put_blocks.append((bx, by, bz, bb))
             res.rmap.reserve(reservation_from_cells(
                 f"{net}:sink@{k[0]},{k[2]}:box",
-                [(bx, by, bz, bb) for (bx, by, bz), bb in box.blocks.items()],
+                put_blocks,
                 "shielded delivery box"))
             for c in dint:
                 self.box_vox[c] = net
-                res.reserved.add((c[0], c[2]))
+            for (bx, _by, bz) in box.blocks:
+                res.reserved.add((bx, bz))
 
-            # the box's out drives the pin's feed cell
+            # the box's out drives the pin's feed cell: jog along z first when
+            # the box sat on an offset row (dz != 0), then east to the feed.
+            # Every cell must be free of foreign boxes — the feed run walks y0
+            # across the whole block, and without a check it overwrote another
+            # net's tower foot (measured: n3's feed run wrote (12,0,17) over
+            # n2's box shell stone).
             bx2, by2, bz2 = box.out_cell
+            if bz2 != k[2]:
+                zstep = 1 if k[2] > bz2 else -1
+                for zz in range(bz2 + zstep, k[2] + zstep, zstep):
+                    if self.box_vox.get((bx2, base, zz)) not in (None, net):
+                        return False
+                    put((bx2, base, zz), W)
+                    res.reserved.add((bx2, zz))
             for xx in range(bx2 + 1, k[0]):
-                put((xx, base, bz2), W)
-                res.reserved.add((xx, bz2))
+                if self.box_vox.get((xx, base, k[2])) not in (None, net):
+                    return False
+                put((xx, base, k[2]), W)
+                res.reserved.add((xx, k[2]))
 
         res.wire_count = sum(1 for b in res.blocks.values() if b == W)
+        res.blocks.update(local_blocks)
         return True
 
-    def _leg(self, put, x, z_from, z_to, res, refresh=12, ty=None):
+    def _leg(self, put, x, z_from, z_to, res, net=None, refresh=12, ty=None):
         """A z-direction run on the trunk plane at column `x`, with a refresh
         repeater every `refresh` cells. Travel +z needs facing=north and -z needs
         facing=south (a repeater reads the side it faces — verified in
@@ -292,6 +347,8 @@ class GlobalFirstRouter:
         run = refresh
         z = z_from
         while True:
+            if net is not None and self.box_vox.get((x, ty, z)) not in (None, net):
+                return False          # leg would overwrite a foreign net's box
             put((x, ty - 1, z), S)
             run += 1
             if run >= refresh and z != z_to and z != z_from:
@@ -300,13 +357,16 @@ class GlobalFirstRouter:
                 run = 0
             else:
                 put((x, ty, z), W)
+            if net is not None:
+                self.box_vox[(x, ty, z)] = net
             res.reserved.add((x, z))
             if z == z_to:
                 break
             z += step
 
     # ---------- P3: local nets, per zone, avoiding the reservations ----------
-    def route_locals(self, local: List[str], reserved: Set[XZ], rounds=2):
+    def route_locals(self, local: List[str], reserved: Set[XZ], rounds=2,
+                     global_vox: Dict[Pos, str] = None):
         by_zone: Dict[tuple, List[str]] = {}
         for n in local:
             s = self.pl.net_sources[n]
@@ -319,7 +379,7 @@ class GlobalFirstRouter:
             # the trunk columns are occupied ground for the plane router
             sub.occupancy = set(self.pl.occupancy) | \
                 {(x, self.base_y, zz) for (x, zz) in reserved}
-            r = BuildableRouter(sub, margin=16)
+            r = BuildableRouter(sub, margin=16, global_vox=global_vox)
             rr = r.route(verbose=False, max_rounds=rounds)
             sh, _ = r._count_shorts(rr)
             out.append((z, nets, rr, sh))
@@ -330,7 +390,9 @@ class GlobalFirstRouter:
         t0 = time.time()
         nets, local, glob = self.classify()
         g = self.build_globals(glob)
-        zres = self.route_locals(local, g.reserved, rounds=rounds)
+        zres = self.route_locals(local, g.reserved, rounds=rounds,
+                                 global_vox={p: f"g:{gv}"
+                                              for p, gv in g.blocks.items()})
         loc_ok = sum(len(nets) - len(rr.failed) for _z, nets, rr, _s in zres)
         loc_short = sum(s for *_x, s in zres)
         loc_wire = sum(rr.total_wires() for _z, _n, rr, _s in zres)

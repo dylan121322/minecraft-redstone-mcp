@@ -198,7 +198,7 @@ class DeliveryBox:
 def box_for_sink(pin_xz, trunk_y, base_y, gap=2):
     """Place a box so its `out` lands `gap` cells west of the pin, on the base
     plane, and its `in` sits at the trunk height. Returns the box."""
-    px, pz = pin_xz
+    px, pz = pin_xz[0], pin_xz[1] + dz
     drop = trunk_y - base_y
     out_x = px - gap
     anchor = (out_x - drop, trunk_y, pz)
@@ -341,14 +341,14 @@ class TowerBox:
         return (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1)
 
 
-def delivery_for_sink(pin_xz, trunk_y, base_y, gap=2, prefer=None):
+def delivery_for_sink(pin_xz, trunk_y, base_y, gap=2, prefer=None, dz=0):
     """Pick a delivery module for this sink.
 
     Shallow drops take the staircase (simplest, no inversion to cancel); deeper
     ones take the tower, which does not attenuate. `prefer` forces a kind, which is
     what lets the router retry with the other one when the first does not fit.
     """
-    px, pz = pin_xz
+    px, pz = pin_xz[0], pin_xz[1] + dz
     drop = trunk_y - base_y
     # A staircase eats one level per level dropped, so it only suits shallow drops
     # AND a strong feed. The trunk arrives already attenuated over a long run, so

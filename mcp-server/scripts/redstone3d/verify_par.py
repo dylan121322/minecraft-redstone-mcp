@@ -46,6 +46,11 @@ def _check(net):
         sc.set_block_from_string(sx - 1, base_y, sz,
                                  RB if drive else "minecraft:air")
         sc.set_block_from_string(sx, base_y, sz, W)
+        # io_only=True: the redpiler keeps only nodes reachable from the IO
+        # (inputs/outputs + the driven net), so the world collapses from the full
+        # layout (~90k voxels, 3.5 GB) to the net's chain. With io_only=False
+        # every net's verification built the WHOLE 324x88x32 world and MCHPRS
+        # died allocating 4 GB per worker (measured on Win: 8 workers x 4 GB).
         w = nuc.MchprsWorld.create_with_options(sc, True, False)
         w.tick(80)
         got[drive] = [w.get_redstone_power(kx - 1, base_y, kz)

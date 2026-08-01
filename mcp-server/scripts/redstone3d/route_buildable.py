@@ -61,9 +61,10 @@ class BuildResult:
 
 
 class BuildableRouter:
-    def __init__(self, placement: Placement, margin=10):
+    def __init__(self, placement: Placement, margin=10, global_vox: Dict[Pos, str] = None):
         self.pl = placement
         self.margin = margin
+        self.global_vox = dict(global_vox or {})
         self.cell_xz: Set[XZ] = set((p[0], p[2]) for p in placement.occupancy)
         self.pin_net: Dict[XZ, str] = {}
         for net, pos in placement.net_sources.items():
@@ -91,6 +92,13 @@ class BuildableRouter:
         # free to place wires right against them (that was the 4 shorts). Any new
         # three-dimensional gadget registers here and is checked here.
         self.owner3d: Dict[Pos, str] = {}
+        # Pre-claim the global boxes' 3-D voxels: a local bridge tower rises to
+        # y=9, and without this it would drive rungs straight through a global
+        # delivery box's shell (measured: local wall_torches overwrote
+        # n13:sink@93,21:box's shell stone). Claiming them here makes every
+        # local _free3d/_descent_conflict check see the global geometry.
+        for _pos, _gnet in self.global_vox.items():
+            self.owner3d[_pos] = _gnet
         # negotiated-congestion history: per-cell penalty accumulated across
         # rip-up rounds. A cell that hosted a short in a prior round gets a
         # higher cost, so nets negotiate away from contested cells over rounds.
