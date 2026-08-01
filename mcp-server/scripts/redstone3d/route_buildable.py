@@ -457,6 +457,16 @@ class BuildableRouter:
             o = oc.get((xz[0]+dx, xz[1]+dz))
             if o is not None and o != net:
                 return False
+        # Global trunk boxes sit on THEIR plane (base+5+4k), which a local
+        # cross layer can share numerically. A local wire placed one cell beside
+        # a trunk wire is a real MC short-adjacency (measured: n3's trunk at
+        # (9,21,20) read 9 with its source cut, driven by local wires at
+        # (9,21,19)/(9,21,21)). Check the global voxels' 8-neighbourhood here.
+        for dx, dz in _PLANE_SHELL:
+            q = (xz[0] + dx, cy, xz[1] + dz)
+            gv = self.global_vox.get(q)
+            if gv is not None:
+                return False
         return True
 
     def _y2_bfs(self, sources, goal, net, cy):

@@ -355,7 +355,7 @@ def delivery_for_sink(pin_xz, trunk_y, base_y, gap=2, prefer=None, dz=0):
     # the safe default is the tower — it regenerates at every rung and delivers a
     # constant 14 at any depth (measured 4..28). Stairs stay available for the very
     # shallow case, where their smaller volume is worth it.
-    kind = prefer or ("stairs" if drop <= 4 else "tower")
+    kind = prefer or ("stairs" if drop <= STAIRS_MAX_DROP else "tower")
     if kind == "stairs":
         out_x = px - gap
         return DeliveryBox(anchor=(out_x - drop, trunk_y, pz), drop=drop), "stairs"

@@ -299,6 +299,22 @@ class GlobalFirstRouter:
                 res.reserved.add((x, oz))
             if iz != oz:
                 self._leg(put, ix, oz, iz, res, net=net, ty=ty)
+            # Feed the box's WEST-facing input repeater: it reads (ix-1, iz),
+            # but the leg arrives from the north at (ix, iz) which the repeater
+            # then occupies. An L-jog west then south puts a wire at (ix-1, iz)
+            # connected to the leg (measured: n4's stairs in read an empty
+            # (213,5,19) and the whole delivery stayed dark).
+            if (ix - 1, iz) not in res.blocks and \
+               self.box_vox.get((ix - 1, ty, iz)) in (None, net):
+                if iz + 1 <= self.z1 + 1:
+                    # full L: (ix, iz+1) is the leg's last wire (the leg walks
+                    # DOWN toward iz), jog west then south so the wire at
+                    # (ix-1, iz) is fed by the leg
+                    for jx, jz in ((ix - 1, iz + 1), (ix - 1, iz)):
+                        put((jx, ty - 1, jz), S)
+                        put((jx, ty, jz), W)
+                        self.box_vox[(jx, ty, jz)] = net
+                        res.reserved.add((jx, jz))
 
             put_blocks = []
             for (bx, by, bz), bb in box.blocks.items():
