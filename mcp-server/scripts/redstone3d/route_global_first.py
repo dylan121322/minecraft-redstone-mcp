@@ -75,7 +75,7 @@ class GlobalFirstRouter:
         self.tower_cols: Dict[XZ, str] = {}
         # (x,z) -> net for every column a DeliveryBox occupies; boxes are
         # shielded, so they only need to not overlap each other.
-        self.box_cols: Dict[XZ, str] = {}
+        self.box_vox: Dict[Pos, str] = {}
         # net -> its OWN trunk Y. Sharing one plane let a net's leg cross
         # another net's trunk row; separate layers remove that entirely.
         self.net_trunk_y: Dict[str, int] = {}
@@ -159,9 +159,20 @@ class GlobalFirstRouter:
         # delivery, then turning onto this net's row
         first_sink_x = min(k[0] for k in sinks)
         run_to = max(src[0] + 6, first_sink_x - 24)
+        # Choose the climb column dynamically. All source pins sit on x=0, so
+        # fixed offsets put adjacent nets' ladders in the same column (measured:
+        # n2's torch at (3,5,31) collided with n4's cross-leg repeater there).
+        # The climb tower occupies (cx, y, sz) for y in base+1..plane, so pick
+        # the first cx in src+2..src+6 whose tower cells are all free.
+        climb_x = -1
+        for cand in range(src[0] + 2, src[0] + 7):
+            cells = [(cand, y, src[2]) for y in range(base + 1, ty + 1)]
+            if all(self.box_vox.get(c) in (None, net) for c in cells):
+                climb_x = cand
+                break
         try:
             tb = TrunkBox(src_cell=(src[0], base, src[2]), plane=ty,
-                          run_to_x=run_to, leg_to_z=row)
+                          run_to_x=run_to, leg_to_z=row, climb_x=climb_x)
         except AssertionError:
             return False
         # The box's shell inevitably passes over the PI column and the first gate
@@ -181,7 +192,7 @@ class GlobalFirstRouter:
                            for y in range(tb.extent[0][1], tb.extent[1][1] + 1))]
         if blocked:
             return False
-        if any(self.box_cols.get(c) not in (None, net) for c in tb.cells()):
+        if any(self.box_vox.get(c) not in (None, net) for c in interior):
             return False
         for (bx, by, bz), bb in tb.blocks.items():
             if bb == S and ((bx, bz) in self.cell_xz or (bx, bz) in self.pin_xz):
@@ -191,9 +202,9 @@ class GlobalFirstRouter:
             f"{net}:trunk",
             [(bx, by, bz, bb) for (bx, by, bz), bb in tb.blocks.items()],
             "shielded trunk box"))
-        for c in tb.cells():
-            self.box_cols[c] = net
-            res.reserved.add(c)
+        for c in interior:
+            self.box_vox[c] = net
+            res.reserved.add((c[0], c[2]))
 
         # each sink: a delivery box hung off the trunk's row
         for k in sinks:
@@ -203,7 +214,8 @@ class GlobalFirstRouter:
                 cols = cand.cells()
                 if any(c in self.cell_xz or c in self.pin_xz for c in cols):
                     continue
-                if any(self.box_cols.get(c) not in (None, net) for c in cols):
+                dint = {c for (c, b) in cand.blocks.items() if b != S}
+                if any(self.box_vox.get(c) not in (None, net) for c in dint):
                     continue
                 box = cand
                 break
@@ -227,9 +239,9 @@ class GlobalFirstRouter:
                 f"{net}:sink@{k[0]},{k[2]}:box",
                 [(bx, by, bz, bb) for (bx, by, bz), bb in box.blocks.items()],
                 "shielded delivery box"))
-            for c in box.cells():
-                self.box_cols[c] = net
-                res.reserved.add(c)
+            for c in dint:
+                self.box_vox[c] = net
+                res.reserved.add((c[0], c[2]))
 
             # the box's out drives the pin's feed cell
             bx2, by2, bz2 = box.out_cell

@@ -53,6 +53,8 @@ class TrunkBox:
     plane: int               # trunk Y inside the box
     run_to_x: int            # how far east the horizontal run goes
     leg_to_z: int            # which z the leg ends on (the sink's row)
+    climb_x: int = -1        # optional explicit climb column (router-assigned to
+                             # dodge other nets' ladders/legs); -1 = auto by sz
     blocks: Dict[Pos, str] = field(default_factory=dict)
     in_cell: Pos = (0, 0, 0)
     out_cell: Pos = (0, 0, 0)
@@ -68,8 +70,13 @@ class TrunkBox:
         body[(sx, base, sz)] = W                  # the pin's own dust (in_cell)
         body[(sx + 1, base, sz)] = _rep("west")   # reads the pin, drives the climb
 
-        # --- climb: 1x1 torch ladder, block0 driven by that repeater
-        cx = sx + 2
+        # Climb column: router-assigned when given (the router knows which
+        # columns the earlier nets' ladders and legs already own); otherwise a
+        # fixed offset by source-z parity. Fixed offsets were never enough: all
+        # source pins sit on x=0 at z = 19 + 12k, and 12 divides any offset
+        # pattern, so adjacent nets always landed on the same column (measured:
+        # n2's torch at (3,5,31) collided with n4's cross-leg repeater there).
+        cx = self.climb_x if self.climb_x >= 0 else (sx + (3 if sz % 2 else 2))
         span = self.plane - 1 - base
         assert span % 2 == 0, "climb needs an even span"
         self.torches = span // 2
@@ -81,40 +88,45 @@ class TrunkBox:
         body[(cx, y, sz)] = S                     # top block
         body[(cx, y + 1, sz)] = W                 # readable dust at `plane`
 
-        # --- horizontal run east along z = sz, refreshed
-        run = 0
-        x = cx
-        while x < self.run_to_x:
-            x += 1
-            body[(x, self.plane - 1, sz)] = S
-            run += 1
-            if run >= REFRESH and x != self.run_to_x:
-                body[(x, self.plane, sz)] = _rep("west")   # travel +x reads west
-                run = 0
-            else:
-                body[(x, self.plane, sz)] = W
-        turn_x = x
-
-        # --- leg along z toward the sink's row, refreshed
-        # The run and the leg used to count refreshes independently, so the distance
-        # left over at the end of the run plus the first stretch of the leg could add
-        # up past 15 and the signal died in the corner (measured: run ended 10 cells
-        # after its last repeater, the leg then went 12 more — 22 unrefreshed).
-        # A repeater cannot sit ON the corner (its input and output axes differ), so
-        # the leftover is carried into the leg's counter instead.
+        # --- LEG FIRST: turn onto this net's corridor row, THEN run east.
+        # The old order ran east along z = sz (the SOURCE's row) and only turned
+        # afterwards. But the source's row is a GATE row: measured on alu1's n32,
+        # a run from x=104 to x=282 along z=1 crossed sixteen gate columns
+        # (x=18..316 are gate bodies on that row), so the box was rejected for
+        # collision every time. Turning onto the corridor row first keeps the long
+        # horizontal stretch inside the reserved corridor, which is gate-free by
+        # construction, and leaves only the 3-cell climb on the source's row.
         step = 1 if self.leg_to_z >= sz else -1
         facing = "north" if step == 1 else "south"   # measured: travel +z -> north
-        run = run                                    # carry the leftover distance
+        run = 0
         z = sz
         while z != self.leg_to_z:
             z += step
-            body[(turn_x, self.plane - 1, z)] = S
+            body[(cx, self.plane - 1, z)] = S
             run += 1
             if run >= REFRESH and z != self.leg_to_z:
-                body[(turn_x, self.plane, z)] = _rep(facing)
+                body[(cx, self.plane, z)] = _rep(facing)
                 run = 0
             else:
-                body[(turn_x, self.plane, z)] = W
+                body[(cx, self.plane, z)] = W
+        leg_z = self.leg_to_z
+
+        # --- horizontal run east along the corridor row, refreshed.
+        # `run` carries the leg's leftover distance: a repeater cannot sit ON the
+        # corner (its input and output axes differ), so the unrefreshed cells from
+        # the leg must count toward the run's first refresh or the signal dies in
+        # the corner (measured: 10 + 12 = 22 unrefreshed).
+        x = cx
+        while x < self.run_to_x:
+            x += 1
+            body[(x, self.plane - 1, leg_z)] = S
+            run += 1
+            if run >= REFRESH and x != self.run_to_x:
+                body[(x, self.plane, leg_z)] = _rep("west")   # travel +x reads west
+                run = 0
+            else:
+                body[(x, self.plane, leg_z)] = W
+        turn_x = x
 
         self.in_cell = (sx, base, sz)
         self.out_cell = (turn_x, self.plane, self.leg_to_z)
@@ -188,8 +200,14 @@ class TrunkBox:
         return out
 
     def cells(self):
-        (x0, _y0, z0), (x1, _y1, z1) = self.extent
-        return {(x, z) for x in range(x0, x1 + 1) for z in range(z0, z1 + 1)}
+        """The (x, z) columns this box ACTUALLY occupies — the projection of its
+        blocks (interior + shell). NOT the bounding box: the old version returned
+        every column in the extent rectangle, which for a long trunk is ~17x the
+        real footprint (measured: 12489 vs 732 for a 200-cell run). box_cols used
+        that to claim exclusivity, so ANY two long trunks collided and every net
+        after the first failed (measured: 423-4800 conflicts per net). Only the
+        columns that carry a block can conflict with another box."""
+        return {(x, z) for (x, y, z) in self.blocks}
 
     def volume(self):
         (x0, y0, z0), (x1, y1, z1) = self.extent

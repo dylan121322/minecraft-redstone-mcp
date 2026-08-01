@@ -613,7 +613,7 @@ class BuildableRouter:
                 land = (gx + 1, zz)
             if any(c in self.cell_xz or c in self.pin_net for c in cells):
                 continue
-            if any(self._descent_conflict(c, net) for c in cells):
+            if any(self._descent_conflict(c, net, cy_cross) for c in cells):
                 continue
             # when the corridor runs on an offset row (zz != gz) the landing is
             # not yet beside the pin: add a short y0 jog along z from the landing
@@ -625,7 +625,7 @@ class BuildableRouter:
                     jog.append((land[0], t))
                 if any(c in self.cell_xz or c in self.pin_net for c in jog):
                     continue
-                if any(self._descent_conflict(c, net) for c in jog):
+                if any(self._descent_conflict(c, net, cy_cross) for c in jog):
                     continue
             chosen = (side, zz, cells, jog)
             break
@@ -718,8 +718,16 @@ class BuildableRouter:
             cyy -= 1
             if cyy > y0:
                 p.append(("block", cx, cyy-1, cz)); p.append(("dust", cx, cyy, cz))
+                self.owner3d[(cx, cyy, cz)] = net   # intermediate rung is conducting
             else:
                 p.append(("dust", cx, y0, cz))
+            # Register the column in the SAME cross layer too: another net's
+            # _y2_bfs (its cross-plane BFS) checks only owner_cross, so a descent
+            # staircase here was invisible to it and it laid its own cross run
+            # right beside the rungs (measured: n30's cross (87,5,18/20) shorted
+            # n7's descent rung at (87,5,19)).
+            oc = self.owner_cross.setdefault(cy_cross, {})
+            oc[(cx, cz)] = net
             self.owner0[(cx, cz)] = net
             self.support1[(cx, cz)] = net
         # y0 jog from the landing row to the pin's feed cell (offset corridors)
@@ -752,6 +760,13 @@ class BuildableRouter:
             if not placed_rep:
                 p.append(("support", x, cy_cross, z))
                 p.append(("dust", x, cy_cross+1, z))
+            # register the CONDUCTING voxel (the dust/repeater at cy_cross+1) in
+            # the 3-D table: _descent_conflict now checks whole columns against
+            # owner3d, so a cross run that another net's descent crosses must be
+            # visible there (measured: n30's cross run at (87,5,18/20) shorted
+            # n7's descent at (87,5,19) because the cross voxels were only in
+            # owner_cross, which the descent check never read).
+            self.owner3d[(x, cy_cross+1, z)] = net
             oc[(x, z)] = net
             self.support1[(x, z)] = net
             self.owner3d[(x, cy_cross+1, z)] = net
@@ -928,9 +943,15 @@ class BuildableRouter:
                 return True
         return False
 
-    def _descent_conflict(self, xz, net):
-        """A descent column touches y0..y4 at xz. Conflict if a foreign wire is
-        at/adjacent on y0 OR on the cross plane."""
+    def _descent_conflict(self, xz, net, y_top: int = None):
+        """A descent column touches every layer from y0 up to the net's cross
+        plane at xz. Conflict if a foreign wire is at/adjacent on y0 OR on any
+        intermediate layer. The intermediate layers were the gap: two nets on
+        DIFFERENT cross layers (y4 vs y24) descended through the same xz and
+        their staircases brushed at y=5 with no ownership check (measured: n7's
+        descend at (87,5,19) shorted n30's descend at (87,5,18)/(87,5,20)).
+        owner3d holds every conducting voxel placed so far, so check the whole
+        column against it."""
         if self._foreign_plane(xz, net, self.owner0):
             return True
         o0 = self.owner0.get(xz)
@@ -938,6 +959,11 @@ class BuildableRouter:
             return True
         if self._foreign_pin_adj(xz, net, xz):
             return True
+        if y_top is not None:
+            for y in range(self.base_y + 1, y_top + 1):
+                o = self.owner3d.get((xz[0], y, xz[1]))
+                if o is not None and o != net:
+                    return True
         return False
 
     def _materialize(self, nets, placements, bridges):

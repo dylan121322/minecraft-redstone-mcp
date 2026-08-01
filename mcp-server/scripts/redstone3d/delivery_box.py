@@ -183,9 +183,12 @@ class DeliveryBox:
         return out
 
     def cells(self):
-        """Every (x,z) column the box occupies — what the router must keep clear."""
-        (x0, _y0, z0), (x1, _y1, z1) = self.extent
-        return {(x, z) for x in range(x0, x1 + 1) for z in range(z0, z1 + 1)}
+        """Every (x,z) column the box ACTUALLY occupies (projection of its
+        blocks). The bounding-box version claimed exclusivity over far more
+        columns than the box touches, so two adjacent deliveries (or a delivery
+        next to a trunk) always collided in box_cols even though their shells
+        could overlap freely — the shell is protective, not load-bearing."""
+        return {(x, z) for (x, y, z) in self.blocks}
 
     def volume(self):
         (x0, y0, z0), (x1, y1, z1) = self.extent
