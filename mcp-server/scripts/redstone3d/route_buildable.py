@@ -693,6 +693,13 @@ class BuildableRouter:
             if not placed_rep:
                 p.append(("support", x, cy_cross, z))
                 p.append(("dust", x, cy_cross+1, z))
+            # Register the conducting voxel in the 3-D table. This is the
+            # staircase branch's INLINE cross lay (it does not call _lay_cross),
+            # and without this the cross wires were invisible to _descent_conflict
+            # — another net's descent then placed its rungs right beside them
+            # (measured: n7's descent at (87,5,19) shorted n30's cross at
+            # (87,5,18)/(87,5,20) because owner3d was empty).
+            self.owner3d[(x, cy_cross+1, z)] = net
             oc[(x, z)] = net; self.support1[(x, z)] = net
             climbed[net].add((x, z))
         # Refresh before the descent: the signal reaches the staircase already
