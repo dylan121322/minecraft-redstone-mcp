@@ -65,7 +65,11 @@ def verify(mod, nl, jobs, limit=None):
     from route_global_first import route_adaptive
     t0 = time.time()
     pl = place(nl, col_gap=16, row_gap=16)
-    rep, r, g, zres = route_adaptive(pl)
+    # Fix the zone granularity at the FIRST grid entry (96x192): adaptive
+    # search lands on 64x128 because it routes 29/29, but that layout's global
+    # chains measure electrically dead (7/29 links) while 96x192's are alive
+    # (14/28). Completeness is not the same as correctness.
+    rep, r, g, zres = route_adaptive(pl, grid=((96, 192),))
 
     blocks = {}
     def raw(x, y, z, s):
@@ -99,8 +103,13 @@ def verify(mod, nl, jobs, limit=None):
     # test the condition 30k times. The 2x2 down-tower rungs are wall torches too
     # and must be KEPT, which is why the filter is height-based.
     base_y0 = pl.bounds[0][1]
+    # Remove only the GATE OUTPUT torches (y=base_y0, inside a gate body). The
+    # old filter removed EVERY wall torch at y=base_y0, which also deleted the
+    # delivery towers' bottom rungs (e.g. n4's (221,0,19)) — the towers then
+    # had a missing rung and every global net read 0 at its sinks.
+    gate_cols = set((p[0], p[2]) for p in pl.occupancy)
     items = [(x, y, z, s) for (x, y, z), s in blocks.items()
-             if not ("wall_torch" in s and y == base_y0)]
+             if not ("wall_torch" in s and y == base_y0 and (x, z) in gate_cols)]
     srcs = {n: (pl.net_sources[n][0], pl.net_sources[n][2]) for n in routed}
     sinks = {n: [(k[0], k[2]) for k in pl.net_sinks[n]] for n in routed}
     base_y = pl.bounds[0][1]
