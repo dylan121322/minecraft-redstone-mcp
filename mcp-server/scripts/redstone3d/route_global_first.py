@@ -299,7 +299,28 @@ class GlobalFirstRouter:
                 self.box_vox[(x, ty, oz)] = net
                 res.reserved.add((x, oz))
             if iz != oz:
-                self._leg(put, ix, oz, iz, res, net=net, ty=ty)
+                # The leg column ix can collide with this net's OWN trunk leg
+                # (trunk leg_x is chosen independently of the box's x — measured
+                # on n13: both landed on x=78 and the leg overwrote the trunk's
+                # leg wire, 17 audit violations). Walk the leg on the first free
+                # column near ix instead, then jog back at the bottom.
+                lx = ix
+                for cand in range(ix, ix + 4):
+                    if self.box_vox.get((cand, ty, oz)) in (None, net) and \
+                       (cand, ty, oz) not in res.blocks:
+                        lx = cand
+                        break
+                self._leg(put, lx, oz, iz, res, net=net, ty=ty)
+                # jog the leg back onto the box's column at the bottom (a short
+                # +x wire at the same height, then the L below)
+                if lx != ix:
+                    for xx in range(lx, ix):
+                        if (xx, ty, iz) in res.blocks:
+                            return False
+                        put((xx, ty - 1, iz), S)
+                        put((xx, ty, iz), W)
+                        self.box_vox[(xx, ty, iz)] = net
+                        res.reserved.add((xx, iz))
             # Feed the box's WEST-facing input repeater: it reads (ix-1, iz),
             # but the leg arrives from the north at (ix, iz) which the repeater
             # then occupies. An L-jog west then south puts a wire at (ix-1, iz)
