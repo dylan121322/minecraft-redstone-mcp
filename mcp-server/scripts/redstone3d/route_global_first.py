@@ -260,13 +260,13 @@ class GlobalFirstRouter:
                 dint = {c for (c, b) in cand.blocks.items() if b != S}
                 if any(self.box_vox.get(c) not in (None, net) for c in dint):
                     continue
-                # Block-level overlap with ALREADY PLACED global blocks: a later
-                # net's delivery shell is stone and invisible to box_vox (which
-                # only tracks interior), yet a neighbour's tower TORCH landing on
-                # that shell cell overwrites it in the emitted world (measured:
-                # n7's down-tower rung at (88,1,20) overwrote n13's sink-box
-                # shell stone — same cell, two boxes). Any shared cell is a real
-                # block collision, so reject the candidate outright.
+                # Block-level overlap with ALREADY PLACED global blocks AND this
+                # net's own trunk (which lives in local_blocks until commit): a
+                # later net's delivery shell is stone and invisible to box_vox,
+                # yet a neighbour's tower TORCH landing on that shell cell
+                # overwrites it (measured: n18's tower foot (197,0,0) landed on
+                # its OWN trunk's shell because the transactional emit kept the
+                # trunk out of res.blocks during box selection).
                 if any(c in res.blocks for c in cand.blocks):
                     continue
                 box = cand
@@ -303,25 +303,20 @@ class GlobalFirstRouter:
             for (bx, _by, bz) in box.blocks:
                 res.reserved.add((bx, bz))
 
-            # the box's out drives the pin's feed cell: jog along z first when
-            # the box sat on an offset row (dz != 0), then east to the feed.
-            # Every cell must be free of foreign boxes — the feed run walks y0
-            # across the whole block, and without a check it overwrote another
-            # net's tower foot (measured: n3's feed run wrote (12,0,17) over
-            # n2's box shell stone).
+            # the box's out drives the pin's feed cell. Walk EAST on the box's
+            # own row to the pin column, THEN jog along z there. Jogging on the
+            # out column (the old order) crossed the neighbouring net's tower
+            # feet (measured: n3's jog at x=12 from z=15 to 17 wrote (12,0,17)
+            # over n2's box shell); the pin column is clear by construction.
             bx2, by2, bz2 = box.out_cell
+            for xx in range(bx2 + 1, k[0]):
+                put((xx, base, bz2), W)
+                res.reserved.add((xx, bz2))
             if bz2 != k[2]:
                 zstep = 1 if k[2] > bz2 else -1
                 for zz in range(bz2 + zstep, k[2] + zstep, zstep):
-                    if self.box_vox.get((bx2, base, zz)) not in (None, net):
-                        return False
-                    put((bx2, base, zz), W)
-                    res.reserved.add((bx2, zz))
-            for xx in range(bx2 + 1, k[0]):
-                if self.box_vox.get((xx, base, k[2])) not in (None, net):
-                    return False
-                put((xx, base, k[2]), W)
-                res.reserved.add((xx, k[2]))
+                    put((k[0] - 1, base, zz), W)
+                    res.reserved.add((k[0] - 1, zz))
 
         res.wire_count = sum(1 for b in res.blocks.values() if b == W)
         res.blocks.update(local_blocks)
