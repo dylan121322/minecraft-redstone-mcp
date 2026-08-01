@@ -593,7 +593,7 @@ class BuildableRouter:
                         p.append(("wtorch", x, y, z, b))
                     else:
                         p.append(("block", x, y, z))
-                p.append(("dust", gx - 1, y0, gz))
+                p.append(("dust", gx, y0, gz))
                 self._claim3d(cond, net)
                 for c in foot:
                     self.owner0.setdefault(c, net)
@@ -649,12 +649,12 @@ class BuildableRouter:
                     p.append(("wtorch", x, y, z, b))
                 else:
                     p.append(("block", x, y, z))
-            p.append(("dust", gx - 1, y0, gz))
+            p.append(("dust", gx, y0, gz))
             self._claim3d(cond, net)
             for c in foot:
                 self.owner0.setdefault(c, net)
                 self.support1[c] = net
-            self.owner0[(gx - 1, gz)] = net
+            self.owner0[(gx, gz)] = net
             return p
         side, zz, cells, jog = chosen
         cross_top = (cells[0][0] - (1 if side == "W" else -1), zz)
@@ -802,8 +802,15 @@ class BuildableRouter:
             y_from -= 1
         if y_from <= y0:
             return None
+        # Try all 8 rotations. The original 4 always extended the tower's foot
+        # to the EAST (arm/side x = +1), so the foot column at x=gx landed on the
+        # gate body whose pin sits at (gx,gz) — every sink at the west edge of a
+        # gate failed (measured: n7/n8/n21 all FOOT_OC at (gx,gz)). The 4 -x
+        # rotations extend the foot WEST instead, keeping it on open ground.
         for arm, side in (((1, 0), (0, 1)), ((1, 0), (0, -1)),
-                          ((0, 1), (1, 0)), ((0, -1), (1, 0))):
+                          ((0, 1), (1, 0)), ((0, -1), (1, 0)),
+                          ((-1, 0), (0, 1)), ((-1, 0), (0, -1)),
+                          ((0, 1), (-1, 0)), ((0, -1), (-1, 0))):
             cells, foot = down_tower_cells_dir(feed[0], feed[1], y_from, y0,
                                                side=side, arm=arm)
             if any(c in self.cell_xz or c in self.pin_net for c in foot):
@@ -832,7 +839,16 @@ class BuildableRouter:
         s = self.pl.net_sources[net]
         tree.add((s[0], s[2]))
         gx, gz = goal_xz
-        # Dijkstra-ish BFS over legal y0 cells, tracking the closest approach
+        # The BFS is confined to a box around the goal (GOAL_BOX cells each way).
+        # Without this the extension path from a distant source wound through the
+        # whole gate grid and laid hundreds of y0 cells (measured: n14's src
+        # (104,20) -> goal (119,2) filled x=92..160, z=-2..22 and boxed n17's
+        # source into an island). The bridge only needs to hop the LOCAL obstacle,
+        # so laying dust any farther than the goal's neighbourhood is both wasted
+        # and harmful.
+        GOAL_BOX = 10
+        def nbh(c):
+            return abs(c[0]-gx) <= GOAL_BOX and abs(c[1]-gz) <= GOAL_BOX
         prev = {}; seen = set(tree); q = deque(tree)
         best = min(tree, key=lambda c: abs(c[0]-gx) + abs(c[1]-gz))
         best_d = abs(best[0]-gx) + abs(best[1]-gz)
@@ -851,18 +867,20 @@ class BuildableRouter:
                    self._foreign_pin_adj(nx, net, goal_xz):
                     continue
                 seen.add(nx); prev[nx] = cur; q.append(nx)
-                d = abs(nx[0]-gx) + abs(nx[1]-gz)
-                if d < best_d:
-                    best_d = d; best = nx
+                if nbh(nx):
+                    d = abs(nx[0]-gx) + abs(nx[1]-gz)
+                    if d < best_d:
+                        best_d = d; best = nx
         if best in tree:
             return best
-        # lay the dust along the path to `best`
+        # lay the dust along the path to `best`, ONLY inside the goal's box —
+        # the source-side portion of the path is not ours to claim
         path = [best]
         while path[-1] in prev:
             path.append(prev[path[-1]])
         path.reverse()
         for c in path:
-            if c in tree or c in self.pin_net:
+            if c in tree or c in self.pin_net or not nbh(c):
                 continue
             placements[net].append(("dust", c[0], y0, c[1]))
             self.owner0[c] = net
