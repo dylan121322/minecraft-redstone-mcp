@@ -286,8 +286,9 @@ class GlobalFirstRouter:
             # subsequent refresh reads it.
             run_n = 0
             for x in range(min(ox, ix), max(ox, ix) + 1):
-                if self.box_vox.get((x, ty, oz)) not in (None, net):
-                    return False      # run would overwrite a foreign net's box
+                if self.box_vox.get((x, ty, oz)) not in (None, net) or \
+                   (x, ty, oz) in res.blocks:
+                    return False      # run would overwrite a foreign net's box/shell
                 put((x, ty - 1, oz), S)
                 run_n += 1
                 if run_n >= 12 and x != max(ox, ix):
@@ -311,6 +312,8 @@ class GlobalFirstRouter:
                     # DOWN toward iz), jog west then south so the wire at
                     # (ix-1, iz) is fed by the leg
                     for jx, jz in ((ix - 1, iz + 1), (ix - 1, iz)):
+                        if (jx, ty, jz) in res.blocks:
+                            return False   # L-jog would overwrite a foreign shell
                         put((jx, ty - 1, jz), S)
                         put((jx, ty, jz), W)
                         self.box_vox[(jx, ty, jz)] = net
@@ -368,8 +371,9 @@ class GlobalFirstRouter:
         run = refresh
         z = z_from
         while True:
-            if net is not None and self.box_vox.get((x, ty, z)) not in (None, net):
-                return False          # leg would overwrite a foreign net's box
+            if net is not None and (self.box_vox.get((x, ty, z)) not in (None, net)
+                                    or (x, ty, z) in res.blocks):
+                return False          # leg would overwrite a foreign net's box/shell
             put((x, ty - 1, z), S)
             run += 1
             if run >= refresh and z != z_to and z != z_from:

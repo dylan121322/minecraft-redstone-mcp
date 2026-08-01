@@ -461,7 +461,11 @@ class BuildableRouter:
         # cross layer can share numerically. A local wire placed one cell beside
         # a trunk wire is a real MC short-adjacency (measured: n3's trunk at
         # (9,21,20) read 9 with its source cut, driven by local wires at
-        # (9,21,19)/(9,21,21)). Check the global voxels' 8-neighbourhood here.
+        # (9,21,19)/(9,21,21)); ON the trunk cell itself it overwrites it
+        # (measured: a local cross repeater landed on n13's trunk leg at
+        # (78,9,42)). Check the cell itself and the 8-neighbourhood.
+        if self.global_vox.get((xz[0], cy, xz[1])) is not None:
+            return False
         for dx, dz in _PLANE_SHELL:
             q = (xz[0] + dx, cy, xz[1] + dz)
             gv = self.global_vox.get(q)
