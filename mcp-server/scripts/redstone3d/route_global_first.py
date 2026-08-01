@@ -286,6 +286,17 @@ class GlobalFirstRouter:
                                                 (1,1),(1,-1),(-1,1),(-1,-1)))
                            for c in cand.blocks):
                         continue
+                    # FOREIGN nets' CONDUCTING blocks: the box's interior can
+                    # sit beside a foreign wire and be driven by it even though
+                    # the cells never overlap (measured: a stair's out read
+                    # 13/14 with its input cut, fed by a neighbouring net's run
+                    # wire one cell away). Shell stone does not conduct, so only
+                    # non-stone neighbours matter.
+                    if any(any(res.blocks.get((c[0]+_dx, c[1], c[2]+_dz)) not in (None, S)
+                               for _dx, _dz in ((1,0),(-1,0),(0,1),(0,-1),
+                                                (1,1),(1,-1),(-1,1),(-1,-1)))
+                           for c in cand.blocks):
+                        continue
                     box = cand
                     box_dz = dz
                     break
