@@ -254,24 +254,23 @@ class GlobalFirstRouter:
                 for dz in (0, 1, -1, 2, -2):
                     cand, _kind = delivery_for_sink((k[0], k[2]), ty, base,
                                                     gap=gap, dz=dz)
-                cols = cand.cells()
-                if any(c in self.cell_xz or c in self.pin_xz for c in cols):
-                    continue
-                dint = {c for (c, b) in cand.blocks.items() if b != S}
-                if any(self.box_vox.get(c) not in (None, net) for c in dint):
-                    continue
-                # Block-level overlap with ALREADY PLACED global blocks AND this
-                # net's own trunk (which lives in local_blocks until commit): a
-                # later net's delivery shell is stone and invisible to box_vox,
-                # yet a neighbour's tower TORCH landing on that shell cell
-                # overwrites it (measured: n18's tower foot (197,0,0) landed on
-                # its OWN trunk's shell because the transactional emit kept the
-                # trunk out of res.blocks during box selection).
-                if any(c in res.blocks for c in cand.blocks):
-                    continue
-                box = cand
-                box_dz = dz
-                break
+                    cols = cand.cells()
+                    if any(c in self.cell_xz or c in self.pin_xz for c in cols):
+                        continue
+                    dint = {c for (c, b) in cand.blocks.items() if b != S}
+                    if any(self.box_vox.get(c) not in (None, net) for c in dint):
+                        continue
+                    # Block-level overlap with ALREADY PLACED global blocks AND
+                    # this net's own trunk (which lives in local_blocks until
+                    # commit): a neighbour's tower TORCH landing on a shell cell
+                    # overwrites it (measured: n18's tower foot (197,0,0) landed
+                    # on its OWN trunk's shell because the transactional emit
+                    # kept the trunk out of res.blocks during box selection).
+                    if any(c in res.blocks for c in cand.blocks):
+                        continue
+                    box = cand
+                    box_dz = dz
+                    break
             if box is None:
                 print(f'  [{net}] sink{k} no delivery box', flush=True)
                 return False
@@ -280,11 +279,22 @@ class GlobalFirstRouter:
             # turn down the box's column — a single boundary between two shells
             ox, oy, oz = tb.out_cell
             ix, iy, iz = box.in_cell
+            # Refresh every 12 cells: an unrefreshed run decays a level per cell
+            # and died well before the box (measured: n4's 19-cell run from
+            # (201,5,64) read 12 at the start, 3 at x=210, 0 at x=220). The
+            # repeater faces west (travel is +x), placed BEFORE the wire so a
+            # subsequent refresh reads it.
+            run_n = 0
             for x in range(min(ox, ix), max(ox, ix) + 1):
                 if self.box_vox.get((x, ty, oz)) not in (None, net):
                     return False      # run would overwrite a foreign net's box
                 put((x, ty - 1, oz), S)
-                put((x, ty, oz), W)
+                run_n += 1
+                if run_n >= 12 and x != max(ox, ix):
+                    put((x, ty, oz), "minecraft:repeater[facing=west,delay=1]")
+                    run_n = 0
+                else:
+                    put((x, ty, oz), W)
                 self.box_vox[(x, ty, oz)] = net
                 res.reserved.add((x, oz))
             if iz != oz:
