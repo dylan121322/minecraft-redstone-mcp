@@ -64,6 +64,7 @@ class DeliveryBox:
     """
     anchor: Pos                     # the `in` cell (top of the descent)
     drop: int                       # how many levels to descend (>= 1)
+    direction: int = 1              # +1 stairs descend east, -1 descend west
     blocks: Dict[Pos, str] = field(default_factory=dict)
     in_cell: Pos = (0, 0, 0)
     out_cell: Pos = (0, 0, 0)
@@ -96,16 +97,16 @@ class DeliveryBox:
         # and the first descending step starts below it. Without this landing the
         # repeater drove empty air and the staircase never saw the signal.
         interior[(x, y, az)] = "minecraft:repeater[facing=west,delay=1]"
-        x += 1
+        x += self.direction
         interior[(x, y, az)] = W          # the repeater's output landing
         since = 0
         for _ in range(H):
-            x += 1
+            x += self.direction
             y -= 1
             interior[(x, y, az)] = W
             since += 1
             if since >= RUN:
-                x += 1
+                x += self.direction
                 interior[(x, y, az)] = REP_W          # flat landing, same level
                 since = 0
         self.in_cell = (ax, ay, az)
@@ -358,7 +359,16 @@ def delivery_for_sink(pin_xz, trunk_y, base_y, gap=2, prefer=None, dz=0):
     kind = prefer or "stairs"
     if kind == "stairs":
         out_x = px - gap
-        return DeliveryBox(anchor=(out_x - drop, trunk_y, pz), drop=drop), "stairs"
+        # A deep staircase spans `drop` cells; if the west-side anchor would land
+        # outside the field (x<0), descend EAST instead: in = out_x + drop, walk
+        # back west to out. Measured: n3's drop=21 staircase anchored at x=-5 —
+        # off-field — so the trunk's run could never reach it and every sink
+        # stayed dark.
+        if out_x - drop >= 0:
+            return DeliveryBox(anchor=(out_x - drop, trunk_y, pz),
+                               drop=drop, direction=1), "stairs"
+        return DeliveryBox(anchor=(out_x + drop, trunk_y, pz),
+                           drop=drop, direction=-1), "stairs"
     # the tower's out sits a fixed number of columns east of its shaft; place the
     # shaft far enough west that `out` lands gap cells before the pin
     probe = TowerBox(anchor=(0, trunk_y, pz), drop=drop)

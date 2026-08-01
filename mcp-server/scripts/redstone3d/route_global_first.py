@@ -313,7 +313,13 @@ class GlobalFirstRouter:
             # (201,5,64) read 12 at the start, 3 at x=210, 0 at x=220). The
             # repeater faces west (travel is +x), placed BEFORE the wire so a
             # subsequent refresh reads it.
-            run_n = 0
+            # Start the counter at the refresh threshold so the FIRST run cell
+            # is a repeater: the run's input is the leg's END, which arrives
+            # already attenuated (measured: n3's leg delivered 8 at the row, and
+            # a run starting from 8 decayed to 0 before its first refresh, so
+            # the whole run after it stayed dark). Like _leg, re-drive at the
+            # junction.
+            run_n = 11
             for x in range(min(ox, ix), max(ox, ix) + 1):
                 if self.box_vox.get((x, ty, oz)) not in (None, net) or \
                    (x, ty, oz) in res.blocks:
