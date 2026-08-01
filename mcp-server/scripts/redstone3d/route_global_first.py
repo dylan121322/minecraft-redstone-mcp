@@ -338,7 +338,27 @@ class GlobalFirstRouter:
             # feet (measured: n3's jog at x=12 from z=15 to 17 wrote (12,0,17)
             # over n2's box shell); the pin column is clear by construction.
             bx2, by2, bz2 = box.out_cell
-            for xx in range(bx2 + 1, k[0]):
+            # Feed run from the box's out to the pin's feed column (k[0]-1),
+            # EITHER direction: the staircase's flat landings push `out` a
+            # couple of cells past the computed anchor, so out can land EAST of
+            # the feed (measured: n2's sink(174,19) box out at x=174 while the
+            # feed is at 173 — a strictly-eastward range was empty and the feed
+            # never got wired).
+            lo, hi = sorted((bx2 + 1, k[0] - 1))
+            for xx in range(lo, hi + 1):
+                # The feed run walks y0 through possibly dense territory; a
+                # foreign wire on the same layer one cell away is a real MC
+                # short (measured: n2's feed (173,0,0) read 14 with its source
+                # cut, driven by a neighbour's run wire at (173,0,-1)). The
+                # wire itself is never placed beside a foreign interior
+                # (box_vox checks that), but the run's 8-neighbourhood is not
+                # checked anywhere — reject the placement instead of emitting a
+                # silently-cross-talking net.
+                for _dx, _dz in ((1, 0), (-1, 0), (0, 1), (0, -1),
+                                 (1, 1), (1, -1), (-1, 1), (-1, -1)):
+                    _o = self.box_vox.get((xx + _dx, base, bz2 + _dz))
+                    if _o is not None and _o != net:
+                        return False
                 put((xx, base, bz2), W)
                 res.reserved.add((xx, bz2))
             if bz2 != k[2]:
