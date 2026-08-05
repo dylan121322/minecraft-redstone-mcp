@@ -1490,17 +1490,41 @@ class BuildableRouter:
         for n in nets:
             if not placements[n]:
                 failed.append(n); continue
-            own = {(p[0], p[2]) for p in res.wires[n]} | \
-                  {(pos[0], pos[2]) for (pos, _f) in res.repeaters[n]}
+            # Build this net's 3-D conductor set, then require every sink's feed
+            # cell to be in the SAME CONNECTED COMPONENT as the source.
+            #
+            # The previous test only asked whether the feed cell was owned by the
+            # net. MCHPRS exposed why that is not enough: alu1 reported 29/29
+            # routed yet every output was stuck high, because n3's feed at
+            # (17,0,17) held an ISOLATED wire — the whole column above it was
+            # empty, so nothing drove it. "Owned" is not "connected".
+            vox = set(res.wires[n]) | {pos for (pos, _f) in res.repeaters[n]}
+            src = self.pl.net_sources.get(n)
+            if src is None:
+                failed.append(n); continue
+            seed = (src[0], src[1], src[2])
+            # the source pin itself is not a routed voxel; start from its
+            # neighbours that the net owns
+            frontier = [v for v in vox
+                        if abs(v[0]-seed[0]) + abs(v[1]-seed[1]) + abs(v[2]-seed[2]) == 1]
+            comp = set(frontier)
+            dq = deque(frontier)
+            while dq:
+                cur = dq.popleft()
+                for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1),
+                                   (0, 1, 0), (0, -1, 0),
+                                   (1, 1, 0), (-1, 1, 0), (0, 1, 1), (0, 1, -1),
+                                   (1, -1, 0), (-1, -1, 0), (0, -1, 1), (0, -1, -1)):
+                    q = (cur[0]+dx, cur[1]+dy, cur[2]+dz)
+                    if q in vox and q not in comp:
+                        comp.add(q); dq.append(q)
             bad = False
             for k in self.pl.net_sinks.get(n, []):
                 kx, kz = k[0], k[2]
                 # A gate input pin is a repeater[facing=west]: it reads ONLY the
-                # cell to its WEST. Accepting any orthogonal neighbour counted
-                # nets as routed while their signal actually arrived from the
-                # north/south and could never enter the pin (n30 delivered 5 to
-                # (93,0,-1) beside a pin that only reads (92,0,0)).
-                if (kx - 1, kz) not in own:
+                # cell to its WEST.
+                feed = (kx - 1, self.base_y, kz)
+                if feed not in comp:
                     bad = True; break
             if bad:
                 failed.append(n)
