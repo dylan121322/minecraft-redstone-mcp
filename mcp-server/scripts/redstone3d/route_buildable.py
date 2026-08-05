@@ -1498,24 +1498,39 @@ class BuildableRouter:
             # routed yet every output was stuck high, because n3's feed at
             # (17,0,17) held an ISOLATED wire — the whole column above it was
             # empty, so nothing drove it. "Owned" is not "connected".
-            vox = set(res.wires[n]) | {pos for (pos, _f) in res.repeaters[n]}
+            # Nodes must include the TOWER STRUCTURE, not just dust/repeaters: a
+            # 1x1 climb tower is stone blocks + standing torches, and a down
+            # tower is blocks + wall torches. Walking only wires+repeaters
+            # stopped at the tower's base repeater and declared the whole tower
+            # orphaned — measured on n4: 299 voxels, 1 "reachable", while the
+            # full-structure walk shows 26/29 nets actually fed.
+            wires_n = set(res.wires[n])
+            reps_n = {pos for (pos, _f) in res.repeaters[n]}
+            torch_n = {p for p in res.torches if res.torch_nets.get(p) == n}
+            wt_n = {p for (p, _b) in res.wall_torches
+                    if res.wall_torch_nets.get(p) == n}
+            mine = wires_n | reps_n | torch_n | wt_n
+            cols = {(p[0], p[2]) for p in mine}
+            sup_n = {s for s in res.supports if (s[0], s[2]) in cols}
+            vox = mine | sup_n
             src = self.pl.net_sources.get(n)
             if src is None:
                 failed.append(n); continue
             seed = (src[0], src[1], src[2])
-            # the source pin itself is not a routed voxel; start from its
-            # neighbours that the net owns
             frontier = [v for v in vox
                         if abs(v[0]-seed[0]) + abs(v[1]-seed[1]) + abs(v[2]-seed[2]) == 1]
             comp = set(frontier)
             dq = deque(frontier)
+            H4 = ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1))
             while dq:
                 cur = dq.popleft()
-                for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1),
-                                   (0, 1, 0), (0, -1, 0),
-                                   (1, 1, 0), (-1, 1, 0), (0, 1, 1), (0, 1, -1),
-                                   (1, -1, 0), (-1, -1, 0), (0, -1, 1), (0, -1, -1)):
-                    q = (cur[0]+dx, cur[1]+dy, cur[2]+dz)
+                cand = [(cur[0]+d[0], cur[1]+d[1], cur[2]+d[2]) for d in H4]
+                cand.append((cur[0], cur[1]+1, cur[2]))   # torch->block, block->dust
+                cand.append((cur[0], cur[1]-1, cur[2]))   # dust->its support
+                for d in H4:                               # see-below / ramp
+                    cand.append((cur[0]+d[0], cur[1]+1, cur[2]+d[2]))
+                    cand.append((cur[0]+d[0], cur[1]-1, cur[2]+d[2]))
+                for q in cand:
                     if q in vox and q not in comp:
                         comp.add(q); dq.append(q)
             bad = False
