@@ -53,9 +53,18 @@ class BuildResult:
     failed: List[str]
     wire_owner: Dict[Pos, str] = field(default_factory=dict)
     torches: List[Pos] = field(default_factory=list)
+    # REVIEW FINDING #4: standing torches must carry their NET so short-audits
+    # can tell a tower's own rungs from a foreign net's conductors. Without this
+    # every audit either over-counts (same-net torch vs wire) or under-counts
+    # (two different nets' towers adjacent). BuildResult is used by
+    # _materialize (placement order, per-net) so per-net torch lists fit.
+    torch_nets: Dict[Pos, str] = field(default_factory=dict)
     # wall torches carry an explicit blockstate: the 2x2 down-tower rungs need a
     # specific facing, unlike the plain standing torches of the 1x1 up tower.
     wall_torches: List[Tuple[Pos, str]] = field(default_factory=list)
+    wall_torch_nets: Dict[Pos, str] = field(default_factory=dict)
+    # torch/wall_torch constructors are positional in _materialize; keep their
+    # declared type as a plain field default so BuildResult(...) arity is stable.
 
     def total_wires(self) -> int:
         return sum(len(w) for w in self.wires.values())
@@ -610,12 +619,20 @@ class BuildableRouter:
         snap3 = dict(self.owner3d)
         snap1 = dict(self.support1)
         snap_oc = {k: dict(v) for k, v in self.owner_cross.items()}
+        snap_rep = set(self.rep_cells)
+        snap_climbed = dict(climbed)
         res = self._bridge_inner(net, goal_xz, placements, climbed)
         if res is None:
             self.owner0 = snap0
             self.owner3d = snap3
             self.support1 = snap1
             self.owner_cross = snap_oc
+            self.rep_cells = snap_rep
+            # climbed must be restored WHOLE: a failed later sink otherwise wipes
+            # the tower an EARLIER sink of the same net already built (they share
+            # the dict), so the next sink re-climbs onto a stale cross layer and
+            # the run flies into empty air (review finding #2).
+            climbed.clear(); climbed.update(snap_climbed)
         return res
 
     def _bridge_inner(self, net, goal_xz, placements, climbed):
@@ -925,6 +942,12 @@ class BuildableRouter:
             if dt is None:
                 return None
             rot, y_from, pre, dcells, foot, cond = dt
+            if net not in climbed:
+                # the tower was rejected and the staircase found nothing —
+                # nothing to climb from (mirrors the deep-descent branch at
+                # line 812; without this guard the set() below raises KeyError
+                # and crashes the whole route — found by review, Control/n3).
+                return None
             path = self._y2_bfs(set(climbed[net]), (gx - 2, gz), net, cy_cross)
             if path is None:
                 return None
@@ -1428,7 +1451,9 @@ class BuildableRouter:
         return False
 
     def _materialize(self, nets, placements, bridges):
-        res = BuildResult({}, set(), {}, dict(bridges), [], {}, [], [])
+        res = BuildResult({}, set(), {}, dict(bridges), [], {},
+                          torches=[], torch_nets={},
+                          wall_torches=[], wall_torch_nets={})
         for net in nets:
             res.wires[net] = set()
             res.repeaters[net] = []
@@ -1442,8 +1467,10 @@ class BuildableRouter:
                     res.supports.add((pl[1], pl[2], pl[3]))
                 elif role == "torch":
                     res.torches.append((pl[1], pl[2], pl[3]))
+                    res.torch_nets[(pl[1], pl[2], pl[3])] = net
                 elif role == "wtorch":
                     res.wall_torches.append(((pl[1], pl[2], pl[3]), pl[4]))
+                    res.wall_torch_nets[(pl[1], pl[2], pl[3])] = net
             # repeater insertion on long flat dust runs (source-ordered)
             self._insert_repeaters(net, placements[net], res)
             for p in res.wires[net]:
