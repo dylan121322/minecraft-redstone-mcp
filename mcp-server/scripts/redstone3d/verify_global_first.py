@@ -47,7 +47,7 @@ def merged_blocks(pl, g, zres, netlist):
     return blocks
 
 
-def link_check(blocks, pl, net, base_y, ticks=80):
+def link_check(blocks, pl, net, base_y, ticks=400, global_torches=frozenset()):
     """Drive the net's source; read each sink's west feed cell."""
     src = pl.net_sources[net]
     sinks = pl.net_sinks[net]
@@ -57,10 +57,15 @@ def link_check(blocks, pl, net, base_y, ticks=80):
         sc = nuc.Schematic.create(f"v_{net}_{drive}")
         for (x, y, z), s in blocks.items():
             # Mask only the GATE output torches (y == base_y, which is where
-            # cell_library puts them). The 2x2 DOWN tower is built FROM wall
-            # torches, so masking every wall torch silently cut every global
-            # link — the signal reached the shaft top and stopped there.
-            if "wall_torch" in s and y == base_y:
+            # cell_library puts them). The global delivery towers are ALSO built
+            # from wall torches and some land at base_y — masking every wall
+            # torch cut every tower's bottom rung, so every global sink stayed
+            # dark (measured: the sealed tower responds, the merged layout
+            # didn't, and the only difference was the tower's (14,0,15) rung
+            # torch missing). Torches that came from the global layout are the
+            # delivery hardware, never the gate outputs — keep them.
+            if "wall_torch" in s and y == base_y \
+                    and (x, y, z) not in global_torches:
                 continue
             sc.set_block_from_string(x, y, z, s)
         sc.set_block_from_string(sx - 1, base_y, sz,
@@ -75,7 +80,9 @@ def link_check(blocks, pl, net, base_y, ticks=80):
 
 def verify(mod, nl, limit=None):
     t0 = time.time()
-    pl = place(nl, col_gap=16, row_gap=16)
+    import os
+    _rg = int(os.environ.get("ROW_GAP", "16"))
+    pl = place(nl, col_gap=16, row_gap=_rg)
     rep, r, g, zres = route_adaptive(pl)
     blocks = merged_blocks(pl, g, zres, nl)
     base_y = pl.bounds[0][1]
@@ -88,8 +95,19 @@ def verify(mod, nl, limit=None):
 
     ok = 0
     bad = []
+    # torch cells that belong to the ROUTED layout (global delivery towers AND
+    # local bridge towers) — the gate-output mask must not remove them, or the
+    # towers' bottom rungs vanish and every bridged sink goes dark/static
+    # (measured: n22/n23 read a frozen 15 with their tower rung torch masked)
+    global_torches = frozenset((x, y, z) for (x, y, z), b in g.blocks.items()
+                               if "wall_torch" in b and y == base_y)
+    for _z, _nets, rr, _sh in zres:
+        for (pos, _f) in (rr.wall_torches or ()):
+            if pos[1] == base_y:
+                global_torches = global_torches | {pos}
     for net in routed:
-        good, lo, hi = link_check(blocks, pl, net, base_y)
+        good, lo, hi = link_check(blocks, pl, net, base_y,
+                                  global_torches=global_torches)
         ok += good
         if not good:
             bad.append({"net": net, "drive0": lo, "drive1": hi,

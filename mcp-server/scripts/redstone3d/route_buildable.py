@@ -32,6 +32,7 @@ XZ = Tuple[int, int]
 _H = [(1, 0), (-1, 0), (0, 1), (0, -1)]
 _PLANE_SHELL = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
 MAX_RUN = 14
+S = "minecraft:stone"
 # Sink connections longer than this skip the y=0 plane and go straight to a cross
 # layer. Keeps the signal plane free for local wiring and descent corridors.
 # Disabled (very large): forcing long sink connections onto a cross layer did
@@ -97,13 +98,25 @@ class BuildableRouter:
         # delivery box's shell (measured: local wall_torches overwrote
         # n13:sink@93,21:box's shell stone). Claiming them here makes every
         # local _free3d/_descent_conflict check see the global geometry.
+        # Only CONDUCTING global blocks are claimed: a delivery box's stone
+        # SHELL does not conduct, and claiming it made local cross runs and
+        # tower columns reject perfectly good sites next to the shell
+        # (measured: n21's descent top at (249,2) sat beside a global shell at
+        # (248,4,1) and every cross layer failed).
         for _pos, _gnet in self.global_vox.items():
-            self.owner3d[_pos] = _gnet
+            if _gnet.rsplit(":", 1)[-1] != "minecraft:stone":
+                self.owner3d[_pos] = _gnet
         # negotiated-congestion history: per-cell penalty accumulated across
         # rip-up rounds. A cell that hosted a short in a prior round gets a
         # higher cost, so nets negotiate away from contested cells over rounds.
         self.hist0: Dict[XZ, float] = {}   # y=0 plane history cost
         self.histC: Dict[XZ, float] = {}   # cross (y4) plane history cost
+        # cross-plane REFRESH REPEATER cells: a repeater block does not conduct
+        # its input sideways, so a later sink's cross run starting on (or
+        # passing through) a repeater cell reads 0 and the whole descent stays
+        # dark (measured: n25's sink1 run started on sink2's (35,21) repeater
+        # and its z=2 segment never lit).
+        self.rep_cells: Set[XZ] = set()
 
     # ---------- helpers ----------
     def _foreign_plane(self, xz: XZ, net: str, owner: Dict[XZ, str]) -> bool:
@@ -233,12 +246,20 @@ class BuildableRouter:
         def span(n):
             s = self.pl.net_sources[n]; ks = self.pl.net_sinks[n]
             return max(abs(s[0]-k[0])+abs(s[2]-k[2]) for k in ks)
-        base_order = sorted(nets, key=lambda n: (len(self.pl.net_sinks[n]), span(n)))
+        # Long nets FIRST: they need the cleanest corridors, and a short net
+        # routed first claims the shared sink area, boxing the long one out
+        # (measured: n25 span=32 routed before n5 span=46 and sealed n5's sink2
+        # feed — its extend crossed z=18..21, n5's only landing rows).
+        base_order = sorted(nets, key=lambda n: (len(self.pl.net_sinks[n]),
+                                                 -span(n)))
 
         best_res = None; best_key = (1 << 30, 1 << 30)
         priority: List[str] = []          # nets to route first (grew from failures)
         for rnd in range(max_rounds):
             order = priority + [n for n in base_order if n not in priority]
+            # bridge ordering mirrors the y0 ordering: last round's failures get
+            # to claim contested descent areas FIRST this round.
+            self._bridge_priority = priority
             res = self._route_once(order, soft=False, verbose=verbose and rnd == 0)
             shorts, _ = self._count_shorts(res)
             # A short makes the whole module compute WRONG answers, while an
@@ -279,7 +300,9 @@ class BuildableRouter:
             self.owner0.setdefault(src_xz, net)
             tree: Set[XZ] = {src_xz}
             first = True
-            for k in sorted(self.pl.net_sinks[net], key=lambda k: abs(s[0]-k[0])+abs(s[2]-k[2])):
+            for k in sorted(self.pl.net_sinks[net],
+                            key=lambda k: abs(s[0]-k[0])+abs(s[2]-k[2]),
+                            reverse=True):
                 # route to the pin's WEST FEED cell, not the pin itself: the pin
                 # is a west-facing repeater and only conducts from that one cell.
                 goal = (k[0] - 1, k[2])
@@ -342,13 +365,29 @@ class BuildableRouter:
         # minimal. The router retries _bridge per layer, so correctness is kept.
         for net in bridge_nets:
             self.net_cross_y.setdefault(net, y0 + 4)
-        for net, goal in sorted(need_bridge, key=lambda ng: ng[0]):
+        # priority nets (last round's failures) bridge FIRST, mirroring the y0
+        # order: otherwise a net alphabetically earlier always claimed the
+        # contested descent area first and the failed net could never fit.
+        priority = getattr(self, '_bridge_priority', None)
+        bridge_order = sorted(need_bridge,
+                              key=lambda ng: (ng[0] not in (priority or ()),
+                                              ng[0]))
+        for net, goal in bridge_order:
             # try the lowest cross layer first, stepping up (+4 Y each time, so
             # the torch count stays even => non-inverting) only when this layer
             # is genuinely blocked. Keeps hops shallow and short.
             gadget = None
             saved = self.net_cross_y.get(net, y0 + 4)
             for attempt in range(6):
+                # ONCE this net's climb tower is up (an earlier sink succeeded),
+                # the layer is LOCKED: a later sink retrying on a higher layer
+                # would lay its cross on cy+1 while the tower's top stays at the
+                # old cy — the run flies into empty air and the descent never
+                # lights (measured: n6's sink2 cross at y=9 vs its tower at
+                # cy=4). Failed later sinks fail the WHOLE net (best-res
+                # comparison drops it) instead of re-layering.
+                if attempt > 0 and net in climbed:
+                    break
                 self.net_cross_y[net] = saved + 4 * attempt
                 gadget = self._bridge(net, goal, placements, climbed)
                 if gadget:
@@ -464,12 +503,19 @@ class BuildableRouter:
         # (9,21,19)/(9,21,21)); ON the trunk cell itself it overwrites it
         # (measured: a local cross repeater landed on n13's trunk leg at
         # (78,9,42)). Check the cell itself and the 8-neighbourhood.
-        if self.global_vox.get((xz[0], cy, xz[1])) is not None:
+        # Only CONDUCTING global blocks matter: a global box's stone SHELL does
+        # not conduct, and rejecting it boxed whole sinks out (measured: n21's
+        # descent top at (249,2) sat beside a global shell at (248,4,1) and the
+        # strict check left it unroutable at every cross layer).
+        def _conductive(gv):
+            # values arrive as "g:<blockstate>" from the global-first router
+            return gv is not None and gv.rsplit(":", 1)[-1] != "minecraft:stone"
+        gv = self.global_vox.get((xz[0], cy, xz[1]))
+        if _conductive(gv):
             return False
         for dx, dz in _PLANE_SHELL:
             q = (xz[0] + dx, cy, xz[1] + dz)
-            gv = self.global_vox.get(q)
-            if gv is not None:
+            if _conductive(self.global_vox.get(q)):
                 return False
         # A cross wire at cy is dust at cy+1. ANOTHER net's DESCEND rung can sit
         # on the same height from a higher cross layer (cy=8 descends through
@@ -485,6 +531,21 @@ class BuildableRouter:
             o = self.owner3d.get((xz[0] + dx, dy, xz[1] + dz))
             if o is not None and o != net:
                 return False
+            # ANY torch cell (even this net's) in the 8-neighbourhood: a lit
+            # torch couples diagonally in MCHPRS and a tower's intermediate
+            # torch is lit exactly when the net is OFF (measured: n5's
+            # 4-torch tower torch5 lit at drive0, driving the mainline at 15).
+            if o is not None and str(o).endswith(":torch"):
+                return False
+        # A refresh REPEATER cell (even this net's) does not conduct sideways:
+        # a wire one cell beside it reads 0 and the run stays dark (measured:
+        # n25's z=2 segment started beside sink2's (35,21) repeater and never
+        # lit). Reject the repeater's 8-neighbourhood as well as the cell.
+        if xz in self.rep_cells:
+            return False
+        for dx, dz in _PLANE_SHELL:
+            if (xz[0] + dx, xz[1] + dz) in self.rep_cells:
+                return False
         return True
 
     def _y2_bfs(self, sources, goal, net, cy):
@@ -497,6 +558,11 @@ class BuildableRouter:
         # the SOURCE's column, leaving only a short x-run at the goal.
         import heapq
         X_PEN = 6.0
+        # Sources that are refresh REPEATERS carry no sideways signal — a run
+        # starting on one reads 0 (measured: n25). Start from the other cells.
+        sources = {s for s in sources if s not in self.rep_cells}
+        if not sources:
+            return None
         dist = {c: 0.0 for c in sources}
         prev: Dict[XZ, XZ] = {}
         pq = [(0.0, c) for c in sources]
@@ -513,7 +579,15 @@ class BuildableRouter:
                 continue
             for dx, dz in _H:
                 nx = (cur[0]+dx, cur[1]+dz)
-                if nx != goal and not self._y2_free(nx, net, cy):
+                # The GOAL cell is checked too: it is the descent top, and a
+                # foreign cross wire diagonally beside it shorts the sink
+                # (measured: n25's cross at (35,5,18) sat diagonal to n5's
+                # descent top (36,5,19) — the goal exemption let it through).
+                if not self._y2_free(nx, net, cy):
+                    continue
+                # A refresh REPEATER cell does not conduct sideways — a path
+                # through it reads 0 and the descent dies (measured: n25).
+                if nx in self.rep_cells:
                     continue
                 nd = d + (X_PEN if dx else 1.0)
                 if nd < dist.get(nx, float("inf")):
@@ -522,7 +596,32 @@ class BuildableRouter:
         return None
 
     def _bridge(self, net, goal_xz, placements, climbed):
-        """Route a bridged sink on the CROSS plane (y=4). Climb ONCE per net via
+        """Transactional wrapper: a failed attempt must not leave occupancy
+        behind, or the next attempt (and the next round) sees ghost towers and
+        keeps failing (measured: n5's climb tower at (15,0) survived a failed
+        attempt and its rung torch sat on the sink stair's seat).
+
+        A second attempt with _force_new_tower is made when the tree-based
+        attempt fails: some sinks CANNOT be reached from the existing tower
+        (its cross run's supports would sit on their staircase seats — n6's
+        sink2), and only a dedicated tower at their own extension end works.
+        """
+        snap0 = dict(self.owner0)
+        snap3 = dict(self.owner3d)
+        snap1 = dict(self.support1)
+        snap_oc = {k: dict(v) for k, v in self.owner_cross.items()}
+        res = self._bridge_inner(net, goal_xz, placements, climbed)
+        if res is None:
+            self.owner0 = snap0
+            self.owner3d = snap3
+            self.support1 = snap1
+            self.owner_cross = snap_oc
+        return res
+
+    def _bridge_inner(self, net, goal_xz, placements, climbed):
+        """Route a bridged sink on the CROSS plane (y=4).
+
+        Climb ONCE per net via
         a 1x1 vertical torch tower (2 torches y0->y4, NON-inverting, verified in
         test_bridge_gadget.py) at its source; subsequent sinks branch off the
         net's existing y=4 tree. Descend into each goal pin with a short +x
@@ -539,20 +638,75 @@ class BuildableRouter:
         p = []
         depth = cy_cross + 1 - y0              # staircase length (dust plane = cross+1)
 
-        if net not in climbed:
-            s = self.pl.net_sources[net]
-            # MINIMAL HOP: start the climb from the point of the net's ALREADY
-            # ROUTED y0 tree that is closest to this sink, not from the source.
-            # Climbing at the source made the signal travel the whole way on the
-            # cross plane (n8: 133 cross cells for an 8-cell obstacle, n13: 216),
-            # which wastes space and multiplies the adjacency surface. The real
-            # blockage is only a few cells wide, so we hop just over it.
-            anchor = self._extend_toward(net, placements, goal_xz)
-            sx, sz = anchor if anchor else (s[0], s[2])
+        tx = tz = None        # climb tower foot (may be unused on later sinks)
+        lead = []
+        s = self.pl.net_sources[net]
+        # EVERY sink gets its own tower ONLY when the existing tree cannot
+        # reach it: a long shared cross lays its SUPPORT blocks over the later
+        # sink's staircase seats (measured: n6's sink2), but an UNNEEDED second
+        # tower's extension seals the neighbour's corridors (measured: n25's
+        # sink2 tower at (40,22) + its (40,17..21) extension boxed out n5's
+        # sink2, whose every staircase row ran beside n25's wire). The outer
+        # _bridge retries with _force_new_tower when the tree-based attempt
+        # fails.
+        # MINIMAL HOP: start the climb from the point of the net's ALREADY
+        # ROUTED y0 tree that is closest to this sink, not from the source.
+        # Climbing at the source made the signal travel the whole way on the
+        # cross plane (n8: 133 cross cells for an 8-cell obstacle, n13: 216),
+        # which wastes space and multiplies the adjacency surface. The real
+        # blockage is only a few cells wide, so we hop just over it.
+        #
+        # EVERY sink gets its own tower when the extension reaches it: a long
+        # cross run shared with an earlier sink lays its SUPPORT blocks over the
+        # later sink's staircase seats and the stair never conducts (measured:
+        # n6's sink2 cross from sink1's tower at (40,0) laid supports on
+        # (38,4,38), sealing sink2's stair). A per-sink tower keeps the cross
+        # short enough to miss the stair area.
+        ext = self._extend_toward(net, placements, goal_xz)
+        anchor = ext[0] if ext else None
+        adir = ext[1] if ext else None
+        sx, sz = anchor if anchor else (s[0], s[2])
+        # When the extension reached the goal's neighbourhood, put the climb
+        # tower ONE CELL BEYOND the extension's end, driven by a repeater at
+        # the end itself: the repeater reads the incoming cell (its facing
+        # side) and outputs to the foot. The old _find_foothold BFS could
+        # pick a foot that was PERPENDICULAR to the extension, forcing the
+        # repeater onto a corner where its output fired into empty air
+        # (measured: n5's climb at (1,24), n20's at (214,2) — both dark).
+        # ONE tower per net: a later sink may EXTEND its tree (a second tower at
+        # the new extension's end would sit on a DIFFERENT cross layer — its
+        # climb torch count is computed from the net's fixed cy, so the run
+        # flies into empty air and the descent stays dark; measured: n6's sink2
+        # tower at (41,39) with the sink1 tower at (0,40)).
+        if net in climbed:
+            anchor = adir = None
+        if anchor and adir:
+            tx, tz = sx + adir[0], sz + adir[1]
+            if (tx, tz) in self.cell_xz or (tx, tz) in self.pin_net or \
+                    self._tower_conflict((tx, tz), net) or \
+                    not self._in_box((tx, tz)):
+                tx = tz = None
+        if tx is None and net not in climbed:
             foot = self._find_foothold(net, (sx, sz))
             if foot is None:
                 return None
             (tx, tz), lead = foot
+            for (lx, lz) in lead:
+                p.append(("dust", lx, y0, lz))
+                self.owner0[(lx, lz)] = net
+        if tx is not None and not self._tower_torch_ok((tx, tz), net):
+            tx = tz = None
+        if tx is not None:
+            if lead:
+                prev_cell = lead[-1]
+                p = [q for q in p if not (q[0] == "dust" and q[1] == prev_cell[0]
+                                          and q[3] == prev_cell[1])]
+                p.append(("rep", prev_cell[0], y0, prev_cell[1],
+                          FLOW_FACING.get((tx - prev_cell[0], tz - prev_cell[1]), "west")))
+                self.owner0[prev_cell] = net
+            else:
+                p.append(("rep", sx, y0, sz, FLOW_FACING.get(adir, "west")))
+                self.owner0[(sx, sz)] = net
             for (lx, lz) in lead:
                 p.append(("dust", lx, y0, lz))
                 self.owner0[(lx, lz)] = net
@@ -570,20 +724,6 @@ class BuildableRouter:
             # The repeater must NOT sit at (tx, y0) — that is block0's cell; the
             # earlier version overwrote block0 with the repeater, leaving torches
             # stacked on a repeater and the cross dust floating (n8's tower dead).
-            prev_cell = lead[-1] if lead else (sx, sz)
-            d_in = (tx - prev_cell[0], tz - prev_cell[1])
-            face = FLOW_FACING.get(d_in, "west")
-            if lead:
-                # replace the last lead dust with the driving repeater
-                p = [q for q in p if not (q[0] == "dust" and q[1] == prev_cell[0]
-                                          and q[3] == prev_cell[1])]
-                p.append(("rep", prev_cell[0], y0, prev_cell[1], face))
-                self.owner0[prev_cell] = net
-            else:
-                # tower adjacent to the source: repeater goes between them only if
-                # there is room; otherwise drive block0 straight from the source
-                # dust (a dust does power an adjacent block enough here).
-                pass
             # the tower base cell must be a solid BLOCK; drop any y0 dust the
             # planar routing had placed there (emit writes wires after supports,
             # so a leftover dust would overwrite block0 and kill the tower).
@@ -596,9 +736,16 @@ class BuildableRouter:
             for _ in range(ncl):
                 p.append(("block", tx, yy, tz))
                 p.append(("torch", tx, yy+1, tz))
+                self.owner3d[(tx, yy, tz)] = net
+                # torch 格标记 :torch — 它的亮/灭在 drive0 恒亮时会耦合
+                # 同 net 的其他路径（measured: n5 的 4-torch 塔 torch5 对角
+                # 耦合主线 (25,5,19)），cross/descent 必须避开
+                self.owner3d[(tx, yy+1, tz)] = f"{net}:torch"
                 yy += 2
             p.append(("block", tx, cy_cross, tz))       # top block
             p.append(("dust", tx, cy_cross+1, tz))      # cross-plane dust
+            self.owner3d[(tx, cy_cross, tz)] = net
+            self.owner3d[(tx, cy_cross+1, tz)] = net
             self.owner0[(tx, tz)] = net
             self.owner_cross.setdefault(cy_cross, {})[(tx, tz)] = net
             self.support1[(tx, tz)] = net
@@ -652,7 +799,49 @@ class BuildableRouter:
                 self.owner0[(gx - 1, gz)] = net
                 return p
 
-        cand = [("W", dz) for dz in (0, 1, -1, 2, -2)]
+        # Deep descents (>11 steps) take the DOWN TOWER first: a staircase that
+        # deep decays to 0 before the bottom (dust loses 1 per step; measured:
+        # n7's cy=12 stair delivered 0/2), while the tower regenerates at every
+        # rung and is verified (test_tower_bidir). Only fall back to the
+        # staircase when no tower rotation fits.
+        #
+        if depth > 11:
+            dt = self._pick_down_tower(net, (gx, gz), cy_cross)
+            if dt is not None:
+                rot, y_from, pre, dcells, foot, cond = dt
+                if net not in climbed:
+                    return None
+                path = self._y2_bfs(set(climbed[net]), (gx - 2, gz), net, cy_cross)
+                if path is not None:
+                    self._lay_cross(net, path, cy_cross, climbed, p)
+                    p += pre
+                    for (x, y, z, b) in dcells:
+                        if b == "minecraft:redstone_wire":
+                            p.append(("dust", x, y, z))
+                        elif "torch" in b:
+                            p.append(("wtorch", x, y, z, b))
+                        else:
+                            p.append(("block", x, y, z))
+                    p.append(("dust", gx, y0, gz))
+                    self._claim3d(cond, net)
+                    for c in foot:
+                        self.owner0.setdefault(c, net)
+                        self.support1[c] = net
+                    self.owner0[(gx - 1, gz)] = net
+                    return p
+        # Prefer the pin's OWN row (dz=0) only when it is clear; otherwise
+        # prefer LARGER offsets: a corridor on an adjacent row (dz=±1/±2) can
+        # sit inside a neighbour's feed 8-neighbourhood and cross-couple the
+        # sinks (measured: n25's zz=21 stair + jog left n5's feed (41,19)
+        # diagonal to n25's (42,20) wire — a frozen 10). Offsets >= 3 keep the
+        # two nets' y0 runs apart.
+        # Own row (dz=0) FIRST when it is clean: the stair's last step lands on
+        # the feed and no jog is needed (measured: n8's sink1 stair on z=52 —
+        # an offset row — crossed its own cross run's support blocks and died;
+        # its own row z=55 is clear). Offset rows are only chosen when the own
+        # row is blocked.
+        cand = [("W", dz) for dz in (0, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7,
+                                     8, -8, 1, -1, 2, -2)]
         chosen = None
         for (side, dz) in cand:
             zz = gz + dz
@@ -666,18 +855,66 @@ class BuildableRouter:
                 continue
             if any(self._descent_conflict(c, net, cy_cross) for c in cells):
                 continue
+            # THIS net's climb tower foot is already on the plane: a staircase
+            # landing on it overwrites the tower's block0 and the climb never
+            # fires (measured: n6's sink1 descent zz=0 landed on the climb foot
+            # at (40,0) — _descent_conflict only rejects FOREIGN owners).
+            if tx is not None and any(c == (tx, tz) for c in cells):
+                continue
+            # The stair's FIRST step reads the cross cell directly above it
+            # ((cells[0], cy_cross+1)): if that cell is a refresh REPEATER, the
+            # block does not conduct downward and the whole stair stays dark
+            # (measured: n6's sink2 stair at (37,4,38) sat under the cross
+            # repeater at (37,5,38) and read 0).
+            if (cells[0][0], zz) in self.rep_cells:
+                continue
+            # STAIRCASE SEATS must be AIR: each diagonal step (x,y)->(x+1,y-1)
+            # only conducts when the cell directly above the landing is empty,
+            # and a block or torch there kills the step (measured: n5's stair
+            # at (15,2,0) sat dark because a climb-tower torch occupied its
+            # seat (15,3,0)).
+            seats = [(gx - depth + i, cy_cross + 2 - i, zz)
+                     for i in range(1, depth + 1)]
+            if any(self._seat_blocked(s, net) for s in seats):
+                continue
             # when the corridor runs on an offset row (zz != gz) the landing is
             # not yet beside the pin: add a short y0 jog along z from the landing
             # to the pin's feed cell, and require that jog to be clear too.
             jog = []
             if zz != gz:
                 step = 1 if gz > zz else -1
-                for t in range(zz + step, gz + step, step):
-                    jog.append((land[0], t))
+                # jog along the FEED column (x = gx): the stair lands at
+                # (gx-1, zz) and the jog must END at the pin's feed cell
+                # (gx, gz) — jogging on the landing column (gx-1) stopped one
+                # cell short and the feed never lit (measured: n7's sink2 stair
+                # on z=18 jogged to (91,19) while the feed sat at (92,19)).
+                for t in range(zz, gz + step, step):
+                    jog.append((gx, t))
                 if any(c in self.cell_xz or c in self.pin_net for c in jog):
                     continue
                 if any(self._descent_conflict(c, net, cy_cross) for c in jog):
                     continue
+            else:
+                # zz == gz: the stair's last step lands ON the feed cell — its
+                # 8-neighbourhood must be clear (a foreign wire diagonally
+                # beside it couples; measured: n5's feed (41,19) sat diagonal
+                # to n25's extension (40,21) and read a frozen 10).
+                if self._descent_conflict((gx, gz), net, cy_cross):
+                    continue
+                # The stair's last step (gx-1, y0+1) needs its support block at
+                # (gx-1, y0) — if THIS net's own extend wire sits there, the
+                # wire (emitted after supports) replaces the block, the step
+                # floats and the feed stays dark (measured: n25's sink2 — the
+                # extend path to its tower foot ran through (40,0,21), directly
+                # under the stair's final step). Reject the own row; the offset
+                # corridors avoid the extend path.
+                if self.owner0.get((gx - 1, gz)) == net:
+                    continue
+                # The stair bottom sits at (gx-1, y0); the FEED is (gx, y0).
+                # A 1-cell horizontal jog connects them (a vertical dust pair
+                # under the last step does not conduct — measured: n25's sink2
+                # feed stayed dark).
+                jog = [(gx, gz)]
             chosen = (side, zz, cells, jog)
             break
         if chosen is None:
@@ -688,7 +925,7 @@ class BuildableRouter:
             if dt is None:
                 return None
             rot, y_from, pre, dcells, foot, cond = dt
-            path = self._y2_bfs(set(climbed[net]), (gx - 1, gz), net, cy_cross)
+            path = self._y2_bfs(set(climbed[net]), (gx - 2, gz), net, cy_cross)
             if path is None:
                 return None
             self._lay_cross(net, path, cy_cross, climbed, p)
@@ -708,6 +945,10 @@ class BuildableRouter:
             self.owner0[(gx, gz)] = net
             return p
         side, zz, cells, jog = chosen
+        if net not in climbed:
+            # the tower was rejected (e.g. torch 8-neighbourhood conflict) —
+            # nothing to climb from
+            return None
         cross_top = (cells[0][0] - (1 if side == "W" else -1), zz)
         path = self._y2_bfs(set(climbed[net]), cross_top, net, cy_cross)
         if path is None:
@@ -769,6 +1010,7 @@ class BuildableRouter:
                 p = [q for q in p if not (q[0] == "dust" and q[1] == rc[0]
                                           and q[2] == cy_cross+1 and q[3] == rc[1])]
                 p.append(("rep", rc[0], cy_cross+1, rc[1], f))
+                self.rep_cells.add((rc[0], rc[1]))
 
         # emit the staircase along the chosen corridor
         cyy = cy_cross + 1
@@ -777,8 +1019,16 @@ class BuildableRouter:
             if cyy > y0:
                 p.append(("block", cx, cyy-1, cz)); p.append(("dust", cx, cyy, cz))
                 self.owner3d[(cx, cyy, cz)] = net   # intermediate rung is conducting
+                self.owner3d[(cx, cyy-1, cz)] = net  # rung support block too
             else:
                 p.append(("dust", cx, y0, cz))
+            # Register the STAIRCASE SEAT (the cell above this landing) as
+            # owned air: a later tower must not place a rung there, or the
+            # diagonal step seals (measured: n5's sink-2 climb tower torch sat
+            # on sink-1's stair seat and killed it). The ":seat" marker lets
+            # _tower3d_conflict reject ONLY these cells — a tower column may
+            # legitimately rise beside a foreign net's cross run.
+            self.owner3d[(cx, cyy + 1, cz)] = f"{net}:seat"
             # Register the column in the SAME cross layer too: another net's
             # _y2_bfs (its cross-plane BFS) checks only owner_cross, so a descent
             # staircase here was invisible to it and it laid its own cross run
@@ -813,6 +1063,8 @@ class BuildableRouter:
                 if f and came == leave:
                     p.append(("support", x, cy_cross, z))
                     p.append(("rep", x, cy_cross+1, z, f))
+                    self.rep_cells.add((x, z))
+                    self.owner3d[(x, cy_cross, z)] = net
                     placed_rep = True
                     run = 0
             if not placed_rep:
@@ -825,9 +1077,13 @@ class BuildableRouter:
             # n7's descent at (87,5,19) because the cross voxels were only in
             # owner_cross, which the descent check never read).
             self.owner3d[(x, cy_cross+1, z)] = net
+            # register the SUPPORT layer too: a staircase seat check reads
+            # owner3d, and an unregistered support let a descent stair land on
+            # the cross run's support block (measured: n6's sink2 stair at
+            # (38,3,38) sat on the (38,4,38) cross support and died).
+            self.owner3d[(x, cy_cross, z)] = net
             oc[(x, z)] = net
             self.support1[(x, z)] = net
-            self.owner3d[(x, cy_cross+1, z)] = net
             climbed[net].add((x, z))
 
     def _pick_down_tower(self, net, pin_xz, cy_cross):
@@ -842,15 +1098,15 @@ class BuildableRouter:
         feed = (gx - 1, gz)
         if feed in self.cell_xz or feed in self.pin_net:
             return None
-        # cross dust sits at cy_cross+1 (odd offset from y0) while the tower needs
-        # an EVEN span for an even torch count; drop one plain see-below level
-        # first when the parity demands it.
-        y_from = cy_cross + 1
-        pre = []
-        if (y_from - y0) % 2:
-            pre = [("block", feed[0], y_from - 2, feed[1]),
-                   ("dust", feed[0], y_from - 1, feed[1])]
-            y_from -= 1
+        # Input chain (all verified in MCHPRS): the cross run's LAST dust ends
+        # one column west of the feed at (feed_x-1, cy_cross+1); a STAIR step
+        # down (the (feed_x, cy_cross+1) seat stays air) reaches the in dust at
+        # (feed_x, cy_cross); that dust weakly powers the A support directly
+        # below it, which strongly powers the A column top. A vertical dust pair
+        # or a 3-deep block chain both die in MCHPRS (measured), so the stair is
+        # the only way across the layer gap.
+        y_from = cy_cross
+        pre = [("dust", feed[0], cy_cross, feed[1])]
         if y_from <= y0:
             return None
         # Try all 8 rotations. The original 4 always extended the tower's foot
@@ -858,10 +1114,14 @@ class BuildableRouter:
         # gate body whose pin sits at (gx,gz) — every sink at the west edge of a
         # gate failed (measured: n7/n8/n21 all FOOT_OC at (gx,gz)). The 4 -x
         # rotations extend the foot WEST instead, keeping it on open ground.
-        for arm, side in (((1, 0), (0, 1)), ((1, 0), (0, -1)),
-                          ((0, 1), (1, 0)), ((0, -1), (1, 0)),
+        # STAIR-INPUT rotations FIRST: with the in dust at (feed_x, cy_cross),
+        # only arm=(0,±1) keeps the torch column off both the feed cell and the
+        # cross run's end (measured: arm=(0,1) side=(-1,0) reads feed 0/14,
+        # every other rotation leaks 14/15 at drive=0 or never turns on).
+        for arm, side in (((0, 1), (-1, 0)), ((0, -1), (-1, 0)),
                           ((-1, 0), (0, 1)), ((-1, 0), (0, -1)),
-                          ((0, 1), (-1, 0)), ((0, -1), (-1, 0))):
+                          ((0, 1), (1, 0)), ((1, 0), (0, 1)),
+                          ((1, 0), (0, -1)), ((0, -1), (1, 0))):
             cells, foot = down_tower_cells_dir(feed[0], feed[1], y_from, y0,
                                                side=side, arm=arm)
             if any(c in self.cell_xz or c in self.pin_net for c in foot):
@@ -873,17 +1133,78 @@ class BuildableRouter:
             cond += [(q[1], q[2], q[3]) for q in pre if q[0] == "dust"]
             if not self._free3d(cond, net):
                 continue
+            # The tower's GROUND voxels sit on the y0 plane, where extension
+            # wires are tracked in owner0 but NOT owner3d (extensions register
+            # only owner0). A tower A column landing on another net's extension
+            # wire overwrites it and shorts both nets (measured: n5's tower A
+            # (40,19) landed on n25's extension (40,19) — 4 shorts).
+            if any(c[1] == y0 and self.owner0.get((c[0], c[2])) not in (None, net)
+                   for c in cond):
+                continue
+            # The FEED wire one cell east of the tower couples to a foreign wire
+            # in its 8-neighbourhood too (measured: n5's feed (41,19) sat
+            # diagonal to n25's extension (40,20) and read a frozen 10 with the
+            # source cut).
+            if any(self.owner0.get((feed[0]+_dx, feed[1]+_dz)) not in (None, net)
+                   for _dx, _dz in _PLANE_SHELL):
+                continue
             if not self._y2_free(feed, net, cy_cross):
                 continue
             return (arm, side), y_from, pre, cells, foot, cond
         return None
 
+    def _seat_blocked(self, seat, net):
+        """True if a staircase seat cell (directly above a landing dust) is
+        occupied by anything conducting — a block, dust, torch or repeater. The
+        seat itself is never part of the stair, but a foreign block there seals
+        the diagonal step in MCHPRS (measured)."""
+        if seat in self.cell_xz or seat in self.pin_net:
+            return True
+        if seat in self.owner3d:
+            return True
+        return False
+
+    def _tower_torch_ok(self, xz, net):
+        """True if a 1x1 climb tower's torch cells have no foreign conducting
+        voxel in their 8-neighbourhood. A tower's INTERMEDIATE torch is lit
+        exactly when the net is OFF, and a lit torch couples diagonally in
+        MCHPRS (measured: n25's 4-torch tower torch5 at (26,5,20) lit at
+        drive0, driving n5's mainline (25,5,19) at 15)."""
+        yb = self.base_y
+        top = self.net_cross_y.get(net, yb + 4)
+        for yy in range(yb + 1, top + 1, 2):
+            for dx, dz in _PLANE_SHELL:
+                o = self.owner3d.get((xz[0] + dx, yy, xz[1] + dz))
+                if o is not None and o != net:
+                    return False
+        return True
+
+    def _tower3d_conflict(self, xz, net):
+        """The 1x1 climb tower occupies the WHOLE column (tx, y0..cy_cross+1,
+        tz) with alternating blocks and standing torches. Any of those voxels
+        already claimed in owner3d — even by THIS net, e.g. a staircase seat
+        registered by an earlier sink — seals the tower (measured: n5's sink-2
+        climb tower rung sat on sink-1's stair seat (15,3,0) and the stair
+        never conducted)."""
+        yb = self.base_y
+        top = self.net_cross_y.get(net, yb + 4) + 1
+        # Only STAIRCASE SEATS block the tower column: any block at all in a
+        # seat seals a stair, so even this net's own seat kills the tower.
+        # Ordinary foreign voxels (cross runs, other towers) are allowed —
+        # rejecting them made the routing oscillate (measured: n8's climb
+        # column collided with n7's cross at (0,5,*) one round and routed fine
+        # the next, so rounds flipped between them forever).
+        return any(str(self.owner3d.get((xz[0], yy, xz[1]))).endswith(":seat")
+                   for yy in range(yb, top + 1))
+
+
     def _extend_toward(self, net, placements, goal_xz):
         """Push the net's y0 route as CLOSE to goal_xz as the plane allows, lay
-        that dust, and return the closest cell reached. The bridge then only has
-        to hop the residual gap (measured: n8's real blockage is 8 cells wide,
-        while climbing at the source made it fly 133 cells on the cross plane).
-        Returns None if nothing was reachable."""
+        that dust, and return the closest cell reached whose BEYOND-cell is a
+        legal climb-tower foot. The bridge then only has to hop the residual
+        gap (measured: n8's real blockage is 8 cells wide, while climbing at
+        the source made it fly 133 cells on the cross plane).
+        Returns (best, adir, path) or (best, None, None)."""
         y0 = self.base_y
         tree = {(p[1], p[3]) for p in placements.get(net, [])
                 if p[0] == "dust" and p[2] == y0}
@@ -900,9 +1221,34 @@ class BuildableRouter:
         GOAL_BOX = 10
         def nbh(c):
             return abs(c[0]-gx) <= GOAL_BOX and abs(c[1]-gz) <= GOAL_BOX
+
+        def tower_ok(p, dirv):
+            """A 1x1 climb tower's FOOT can stand at p+dirv (the cell the
+            extension's repeater outputs to). The foot must be off gate bodies,
+            off the goal's feed cell (the descent must land there), and free of
+            tower conflicts — otherwise the bridge falls back to _find_foothold,
+            whose L-shaped leads put the drive repeater on a corner where it
+            reads empty air (measured: n20's extension ended at (216,2) with
+            its foot (217,2) on a gate body; n6's foot (41,0) collided with
+            the feed cell)."""
+            q = (p[0]+dirv[0], p[1]+dirv[1])
+            if q == goal_xz:
+                return False
+            if q in self.cell_xz or q in self.pin_net:
+                return False
+            if self._tower_conflict(q, net):
+                return False
+            if self._tower3d_conflict(q, net):
+                return False
+            return True
+
         prev = {}; seen = set(tree); q = deque(tree)
-        best = min(tree, key=lambda c: abs(c[0]-gx) + abs(c[1]-gz))
-        best_d = abs(best[0]-gx) + abs(best[1]-gz)
+        # best = closest cell whose BEYOND-cell is a legal tower foot
+        best = None; best_d = None
+        for c in tree:
+            d = abs(c[0]-gx) + abs(c[1]-gz)
+            if best is None or d < best_d:
+                best_d = d; best = c
         while q:
             cur = q.popleft()
             for dx, dz in _H:
@@ -920,22 +1266,40 @@ class BuildableRouter:
                 seen.add(nx); prev[nx] = cur; q.append(nx)
                 if nbh(nx):
                     d = abs(nx[0]-gx) + abs(nx[1]-gz)
-                    if d < best_d:
+                    # the extension must END on a straight stretch whose next
+                    # cell can host the climb tower's foot
+                    if d < best_d and tower_ok(nx, (dx, dz)):
                         best_d = d; best = nx
         if best in tree:
-            return best
+            return (best, None, None)
+
         # lay the dust along the path to `best`, ONLY inside the goal's box —
-        # the source-side portion of the path is not ours to claim
+        # the source-side portion of the path is not ours to claim. EXCEPT when
+        # the net has NO y0 tree at all (its flat BFS failed every sink, so it
+        # has no source-side wiring): then the whole src->best path must be laid
+        # or the climb tower stands on a wire that never reaches the source
+        # (measured: n22's tower at (244,21) had no input, the cross plane never
+        # lit and the sink sat at a frozen 15).
+        have_y0 = any(p[0] == "dust" and p[2] == y0
+                      for p in placements.get(net, ()))
         path = [best]
         while path[-1] in prev:
             path.append(prev[path[-1]])
         path.reverse()
         for c in path:
-            if c in tree or c in self.pin_net or not nbh(c):
+            if c in tree or c in self.pin_net:
                 continue
-            placements[net].append(("dust", c[0], y0, c[1]))
-            self.owner0[c] = net
-        return best
+            if not have_y0 or nbh(c):
+                placements[net].append(("dust", c[0], y0, c[1]))
+                self.owner0[c] = net
+        # direction the path is travelling when it reaches best — the climb
+        # tower sits one cell BEYOND best in this direction, driven by a
+        # repeater AT best that reads the incoming cell and outputs to the foot
+        adir = None
+        if len(path) >= 2:
+            a, b = path[-2], path[-1]
+            adir = (b[0] - a[0], b[1] - a[1])
+        return (best, adir, path)
 
     def _closest_routed_cell(self, net, placements, goal_xz):
         """The net's already-placed y0 cell nearest to goal_xz (Manhattan). The
@@ -972,7 +1336,18 @@ class BuildableRouter:
             # intermediate cell: lead = path[1:-1] must be non-empty to host the
             # driving repeater. hops>=1 still allowed a tower directly beside the
             # source (lead empty, block0 undriven, ladder dead).
-            if cur != start and hops >= 2 and not self._tower_conflict(cur, net):
+            # The foothold must be COLLINEAR with the start (same x or same z):
+            # the driving repeater sits on the lead's last cell, reading the
+            # direction it came from and outputting the OPPOSITE way — so it can
+            # only drive a tower that lies straight ahead. An L-shaped lead put
+            # the repeater on the corner, where its output fired into empty air
+            # and the tower stayed dark (measured: n5's climb at (1,24) with the
+            # repeater at (1,23) outputting east, tower foot south).
+            if cur != start and hops >= 2 and \
+                    (cur[0] == start[0] or cur[1] == start[1]) and \
+                    not self._tower_conflict(cur, net) and \
+                    not self._tower3d_conflict(cur, net) and \
+                    self._tower_torch_ok(cur, net):
                 # reconstruct lead (exclude source and foothold)
                 path = [cur]
                 while path[-1] in prev:

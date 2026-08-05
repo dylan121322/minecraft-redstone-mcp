@@ -28,12 +28,14 @@ from via_gadget import (up_tower_cells, trunk_cells, down_tower_cells_dir,
                         inverter_cells)
 from route_buildable import BuildableRouter
 from reserve import ReserveMap, reservation_from_cells
-from delivery_box import delivery_for_sink
+from delivery_box import delivery_for_sink, STAIRS_MAX_DROP
 from trunk_box import TrunkBox
 
 Pos = Tuple[int, int, int]
 XZ = Tuple[int, int]
 W = "minecraft:redstone_wire"; S = "minecraft:stone"
+_PLANE_SHELL = [(1, 0), (-1, 0), (0, 1), (0, -1),
+                (1, 1), (1, -1), (-1, 1), (-1, -1)]
 
 TRACK_PITCH = 3          # measured minimum isolated corridor spacing
 LAYER_PITCH = 4          # Y between cross layers (keeps tower torch count even)
@@ -85,6 +87,16 @@ class GlobalFirstRouter:
         for n, ks in placement.net_sinks.items():
             for p in ks:
                 self.pin_xz[(p[0], p[2])] = n
+        # exact (x,y,z) cells of gate bodies AND pins — the delivery-box column
+        # check was height-blind (a shell 20 blocks above a pin rejected the
+        # whole box), so the sink loop now checks exact cells + conduction
+        # range instead of column projection.
+        self.occ_cells: Set[Pos] = set(placement.occupancy)
+        self.pins_by_net: Dict[str, List[Pos]] = {}
+        for n, p in placement.net_sources.items():
+            self.pins_by_net.setdefault(n, []).append(p)
+        for n, ks in placement.net_sinks.items():
+            self.pins_by_net.setdefault(n, []).extend(list(ks))
 
     # ---------- classification ----------
     # Zones are TWO-DIMENSIONAL. Splitting on x alone left every z-long connection
@@ -185,7 +197,11 @@ class GlobalFirstRouter:
         # must jig to a gate-free column first.
         leg_x = -1
         z0l, z1l = sorted((src[2], row))
-        for cand in range(src[0] + 2, src[0] + 26):
+        # The leg must sit EAST of the climb: TrunkBox's climb-to-leg jog walks
+        # cx -> leg_x (west-facing repeats), so a leg west of the climb was
+        # never connected (measured: n2's leg_x=2 west of climb_x=5 left the
+        # whole trunk dark past the climb top).
+        for cand in range(max(src[0] + 2, climb_x + 1), src[0] + 26):
             if cand == climb_x:
                 continue
             cols = [(cand, z) for z in range(z0l, z1l + 1)]
@@ -244,8 +260,15 @@ class GlobalFirstRouter:
         # tower straight through a global box's shell (measured: a local tower's
         # wall_torch landed inside n13:sink@93,21:box and its rungs overwrote the
         # box's shell stone).
-        for (bx, _by, bz) in tb.blocks:
-            res.reserved.add((bx, bz))
+        # Reserve only columns with blocks at y <= 9: the local router treats
+        # reserved as y0-plane cell_xz, and the trunk's HIGH layers (y=25 wires)
+        # were blocking whole local corridors that never came near them
+        # (measured: n18's trunk column at (247,25,3..8) reserved (247,3..8),
+        # sealing n21's descent stair at every offset). Local bridge towers top
+        # out at y=9, so anything above that is invisible to them.
+        for (bx, by, bz) in tb.blocks:
+            if by <= 9:
+                res.reserved.add((bx, bz))
 
         # each sink: a delivery box hung off the trunk's row.
         # prev_sink_cells tracks THIS net's earlier sinks' placed cells. Two of
@@ -255,55 +278,129 @@ class GlobalFirstRouter:
         # away). box_vox is keyed by net only, so it cannot distinguish this
         # net's own sinks — this set does.
         prev_sink_cells: Set[Pos] = set()
+        foreign_pins = [p for n2, ps in self.pins_by_net.items()
+                        for p in ps if n2 != net]
         for k in sinks:
             box = None
-            for gap in (2, 3, 4, 5, 6):
-                for dz in (0, 1, -1, 2, -2):
-                    cand, _kind = delivery_for_sink((k[0], k[2]), ty, base,
-                                                    gap=gap, dz=dz)
-                    cols = cand.cells()
-                    if any(c in self.cell_xz or c in self.pin_xz for c in cols):
-                        continue
-                    dint = {c for (c, b) in cand.blocks.items() if b != S}
-                    if any(self.box_vox.get(c) not in (None, net) for c in dint):
-                        continue
-                    # Block-level overlap with ALREADY PLACED global blocks AND
-                    # this net's own trunk (which lives in local_blocks until
-                    # commit): a neighbour's tower TORCH landing on a shell cell
-                    # overwrites it (measured: n18's tower foot (197,0,0) landed
-                    # on its OWN trunk's shell because the transactional emit
-                    # kept the trunk out of res.blocks during box selection).
-                    if any(c in res.blocks for c in cand.blocks):
-                        continue
-                    # This net's OWN earlier sinks' segments: same-net adjacency
-                    # is still a real MC short (different signal paths), unlike
-                    # the trunk which is the same path and legally touches the
-                    # box. Reject overlap AND 8-neighbourhood.
-                    if any(c in prev_sink_cells for c in cand.blocks):
-                        continue
-                    if any(any((c[0]+_dx, c[1], c[2]+_dz) in prev_sink_cells
-                               for _dx, _dz in ((1,0),(-1,0),(0,1),(0,-1),
-                                                (1,1),(1,-1),(-1,1),(-1,-1)))
-                           for c in cand.blocks):
-                        continue
-                    # FOREIGN nets' CONDUCTING blocks: the box's interior can
-                    # sit beside a foreign wire and be driven by it even though
-                    # the cells never overlap (measured: a stair's out read
-                    # 13/14 with its input cut, fed by a neighbouring net's run
-                    # wire one cell away). Shell stone does not conduct, so only
-                    # non-stone neighbours matter.
-                    if any(any(res.blocks.get((c[0]+_dx, c[1], c[2]+_dz)) not in (None, S)
-                               for _dx, _dz in ((1,0),(-1,0),(0,1),(0,-1),
-                                                (1,1),(1,-1),(-1,1),(-1,-1)))
-                           for c in cand.blocks):
-                        continue
-                    box = cand
-                    box_dz = dz
+            # Deep drops need the TOWER: the staircase loses a level per level
+            # dropped and was only measured delivering through 8, while the
+            # tower regenerates at every rung (measured 4..28) and is far more
+            # compact (a drop=21 stair sweeps 83 columns, the tower 24 — the
+            # dense ALU field rejected every stair candidate for n3's
+            # sink(120,0,19)). Shallow drops prefer the smaller stairs.
+            kinds = (("tower", "stairs") if (ty - base) > STAIRS_MAX_DROP
+                     else ("stairs", "tower"))
+            for kind in kinds:
+                for gap in (2, 3, 4, 5, 6):
+                    # Mirror the tower to the z-1 side when a foreign pin sits
+                    # on its z+2 flank: the tower's z+1..z+2 columns (A + torch
+                    # + shell) would seal the neighbour's feed (measured: n18's
+                    # tower sealed n21's feed (251,2)).
+                    # Only pins under the tower's OWN x span matter: the
+                    # delivery tower's shaft sits roughly k[0]-4..k[0]-1 (the
+                    # out is gap cells west of the pin). A pin further east is
+                    # outside the tower and must not trigger a mirror (measured:
+                    # n13's (279,0) tower mirrored for the pin at (279,2) that
+                    # sat beyond its shaft — and the mirrored tower's default
+                    # state outputs 14, freezing the sink).
+                    flip_arm = False
+                    for _px in range(k[0] - 4, k[0]):
+                        if self.pin_xz.get((_px, k[2] + 2)) not in (None, net):
+                            flip_arm = True
+                            break
+                    for dz in (0, 1, -1, 2, -2):
+                        cand, _kind = delivery_for_sink((k[0], k[2]), ty, base,
+                                                        gap=gap, dz=dz,
+                                                        prefer=kind,
+                                                        flip_arm=flip_arm)
+                        # Exact-cell conflict with gate bodies and pins. The old
+                        # check was a height-blind column projection — it
+                        # rejected a box whose SHELL passed 20 blocks above a
+                        # pin while letting a box sit one cell from a foreign
+                        # pin at GROUND level (measured on alu1: n3's drop=21
+                        # stair swept z=19 from x=92..124 and every candidate
+                        # died on pins its interior never got within 10 blocks
+                        # of).
+                        if any(c in self.occ_cells for c in cand.blocks):
+                            continue
+                        # Conduction range of FOREIGN pins: a conducting box
+                        # cell at ground level within one cell of another net's
+                        # pin is a real MC short (dust couples across one
+                        # cell). This net's own pins are the target — the feed
+                        # drives them by design. A box cell directly ABOVE a
+                        # pin is caught by the exact-cell check above (its
+                        # support would sit on the pin cell).
+                        if any(b != S and c[1] == base and
+                               any(abs(c[0] - p[0]) <= 1 and
+                                   abs(c[2] - p[2]) <= 1 and p[1] == base
+                                   for p in foreign_pins)
+                               for c, b in cand.blocks.items()):
+                            continue
+                        # The box's SEAT cells (a stair's diagonal-down ceiling)
+                        # must stay air: a foreign wire's support there blocks
+                        # the stair's step (measured: sink1's leg support at
+                        # (217,4,19) killed sink2's stair). The seats are not in
+                        # the box's blocks, so check them explicitly against
+                        # committed blocks and this net's earlier sink wires.
+                        if any(c in res.blocks or c in prev_sink_cells
+                               for c in cand.keep_air):
+                            continue
+                        dint = {c for (c, b) in cand.blocks.items() if b != S}
+                        if any(self.box_vox.get(c) not in (None, net)
+                               for c in dint):
+                            continue
+                        # Block-level overlap with ALREADY PLACED global blocks
+                        # AND this net's own trunk (which lives in local_blocks
+                        # until commit): a neighbour's tower TORCH landing on a
+                        # shell cell overwrites it (measured: n18's tower foot
+                        # (197,0,0) landed on its OWN trunk's shell because the
+                        # transactional emit kept the trunk out of res.blocks
+                        # during box selection).
+                        if any(c in res.blocks for c in cand.blocks):
+                            continue
+                        # This net's OWN earlier sinks' segments: same-net
+                        # adjacency is still a real MC short (different signal
+                        # paths), unlike the trunk which is the same path and
+                        # legally touches the box. Reject overlap AND
+                        # 8-neighbourhood.
+                        if any(c in prev_sink_cells for c in cand.blocks):
+                            continue
+                        if any(any((c[0]+_dx, c[1], c[2]+_dz) in prev_sink_cells
+                                   for _dx, _dz in ((1,0),(-1,0),(0,1),(0,-1),
+                                                    (1,1),(1,-1),(-1,1),(-1,-1)))
+                               for c in cand.blocks):
+                            continue
+                        # FOREIGN nets' CONDUCTING blocks: the box's interior
+                        # can sit beside a foreign wire and be driven by it
+                        # even though the cells never overlap (measured: a
+                        # stair's out read 13/14 with its input cut, fed by a
+                        # neighbouring net's run wire one cell away). Shell
+                        # stone does not conduct, so only non-stone neighbours
+                        # matter.
+                        if any(any(res.blocks.get((c[0]+_dx, c[1], c[2]+_dz))
+                                   not in (None, S)
+                                   for _dx, _dz in ((1,0),(-1,0),(0,1),(0,-1),
+                                                    (1,1),(1,-1),(-1,1),(-1,-1)))
+                               for c in cand.blocks):
+                            continue
+                        box = cand
+                        break
+                    if box is not None:
+                        break
+                if box is not None:
                     break
             if box is None:
                 print(f'  [{net}] sink{k} no delivery box', flush=True)
                 return False
 
+            # Wire supports on the box's torch-top cells must be GLASS: a stone
+            # support there is charged by the lit torch and leaks its strong
+            # power into the wire above (measured: the tower's torch1 froze the
+            # whole sink on at drive=0). Glass is a solid support (wire stays
+            # placed) that does not conduct (measured in MCHPRS).
+            def sup(x, y, z):
+                put((x, y, z),
+                    "minecraft:glass" if (x, y, z) in box.keep_glass else S)
             # run along this net's row from the trunk's out to the box's in, then
             # turn down the box's column — a single boundary between two shells
             ox, oy, oz = tb.out_cell
@@ -324,15 +421,23 @@ class GlobalFirstRouter:
                 if self.box_vox.get((x, ty, oz)) not in (None, net) or \
                    (x, ty, oz) in res.blocks:
                     return False      # run would overwrite a foreign net's box/shell
-                put((x, ty - 1, oz), S)
+                sup(x, ty - 1, oz)
+                prev_sink_cells.add((x, ty - 1, oz))
                 run_n += 1
-                if run_n >= 12 and x != max(ox, ix):
+                # The FIRST cell is the leg's END (the leg lands at (x,ty,oz)),
+                # so it must be plain dust — a refresh repeater there reads
+                # (x-1, ty, oz), which is empty (measured: n2's run start at
+                # (6,17,73) read 0 with a full-strength leg one cell south).
+                # The refresh starts one cell east, reading this cell.
+                if run_n >= 12 and x != max(ox, ix) and x != min(ox, ix):
                     put((x, ty, oz), "minecraft:repeater[facing=west,delay=1]")
                     run_n = 0
                 else:
                     put((x, ty, oz), W)
                 self.box_vox[(x, ty, oz)] = net
-                res.reserved.add((x, oz))
+                prev_sink_cells.add((x, ty, oz))
+                if ty <= 9:
+                    res.reserved.add((x, oz))
             if iz != oz:
                 # The leg column ix can collide with this net's OWN trunk leg
                 # (trunk leg_x is chosen independently of the box's x — measured
@@ -348,17 +453,22 @@ class GlobalFirstRouter:
                            for z in range(zlo, zhi + 1)):
                         lx = cand
                         break
-                self._leg(put, lx, oz, iz, res, net=net, ty=ty)
+                self._leg(put, lx, oz, iz, res, net=net, ty=ty,
+                         keep_glass=box.keep_glass,
+                         prev_sink_cells=prev_sink_cells)
                 # jog the leg back onto the box's column at the bottom (a short
                 # +x wire at the same height, then the L below)
                 if lx != ix:
                     for xx in range(lx, ix):
                         if (xx, ty, iz) in res.blocks:
                             return False
-                        put((xx, ty - 1, iz), S)
+                        sup(xx, ty - 1, iz)
                         put((xx, ty, iz), W)
                         self.box_vox[(xx, ty, iz)] = net
-                        res.reserved.add((xx, iz))
+                        prev_sink_cells.add((xx, ty, iz))
+                        prev_sink_cells.add((xx, ty - 1, iz))
+                        if ty <= 9:
+                            res.reserved.add((xx, iz))
             # Feed the box's WEST-facing input repeater: it reads (ix-1, iz),
             # but the leg arrives from the north at (ix, iz) which the repeater
             # then occupies. An L-jog west then south puts a wire at (ix-1, iz)
@@ -378,10 +488,13 @@ class GlobalFirstRouter:
                         # returned False, and the whole delivery stayed dark).
                         if self.box_vox.get((jx, ty, jz)) not in (None, net):
                             return False
-                        put((jx, ty - 1, jz), S)
+                        sup(jx, ty - 1, jz)
                         put((jx, ty, jz), W)
                         self.box_vox[(jx, ty, jz)] = net
-                        res.reserved.add((jx, jz))
+                        prev_sink_cells.add((jx, ty, jz))
+                        prev_sink_cells.add((jx, ty - 1, jz))
+                        if ty <= 9:
+                            res.reserved.add((jx, jz))
 
             put_blocks = []
             for (bx, by, bz), bb in box.blocks.items():
@@ -394,8 +507,9 @@ class GlobalFirstRouter:
                 "shielded delivery box"))
             for c in dint:
                 self.box_vox[c] = net
-            for (bx, _by, bz) in box.blocks:
-                res.reserved.add((bx, bz))
+            for (bx, by, bz) in box.blocks:
+                if by <= 9:
+                    res.reserved.add((bx, bz))
 
             # the box's out drives the pin's feed cell. Walk EAST on the box's
             # own row to the pin column, THEN jog along z there. Jogging on the
@@ -426,28 +540,33 @@ class GlobalFirstRouter:
                         return False
                 put((xx, base, bz2), W)
                 prev_sink_cells.add((xx, base, bz2))
-                res.reserved.add((xx, bz2))
+                if ty <= 9:
+                    res.reserved.add((xx, bz2))
             if bz2 != k[2]:
                 zstep = 1 if k[2] > bz2 else -1
                 for zz in range(bz2 + zstep, k[2] + zstep, zstep):
                     put((k[0] - 1, base, zz), W)
                     prev_sink_cells.add((k[0] - 1, base, zz))
-                    res.reserved.add((k[0] - 1, zz))
+                    if ty <= 9:
+                        res.reserved.add((k[0] - 1, zz))
 
         res.wire_count = sum(1 for b in res.blocks.values() if b == W)
         res.blocks.update(local_blocks)
         return True
 
-    def _leg(self, put, x, z_from, z_to, res, net=None, refresh=12, ty=None):
+    def _leg(self, put, x, z_from, z_to, res, net=None, refresh=12, ty=None,
+             keep_glass=frozenset(), prev_sink_cells=None):
         """A z-direction run on the trunk plane at column `x`, with a refresh
         repeater every `refresh` cells. Travel +z needs facing=north and -z needs
         facing=south (a repeater reads the side it faces — verified in
         test_rep_facing). Straight line, so the orientation is unambiguous."""
         ty = self.trunk_y if ty is None else ty
         if z_from == z_to:
-            put((x, ty - 1, z_from), S)
+            put((x, ty - 1, z_from),
+                "minecraft:glass" if (x, ty - 1, z_from) in keep_glass else S)
             put((x, ty, z_from), W)
-            res.reserved.add((x, z_from))
+            if ty <= 9:
+                res.reserved.add((x, z_from))
             return
         step = 1 if z_to > z_from else -1
         facing = "north" if step == 1 else "south"
@@ -461,7 +580,10 @@ class GlobalFirstRouter:
             if net is not None and (self.box_vox.get((x, ty, z)) not in (None, net)
                                     or (x, ty, z) in res.blocks):
                 return False          # leg would overwrite a foreign net's box/shell
-            put((x, ty - 1, z), S)
+            put((x, ty - 1, z),
+                "minecraft:glass" if (x, ty - 1, z) in keep_glass else S)
+            if prev_sink_cells is not None:
+                prev_sink_cells.add((x, ty - 1, z))
             run += 1
             if run >= refresh and z != z_to and z != z_from:
                 put((x, ty, z),
@@ -471,31 +593,132 @@ class GlobalFirstRouter:
                 put((x, ty, z), W)
             if net is not None:
                 self.box_vox[(x, ty, z)] = net
-            res.reserved.add((x, z))
+            if prev_sink_cells is not None:
+                prev_sink_cells.add((x, ty, z))
+            if ty <= 9:
+                res.reserved.add((x, z))
             if z == z_to:
                 break
             z += step
 
     # ---------- P3: local nets, per zone, avoiding the reservations ----------
+    # 分区隔离：zone box = bounds ± margin，不同 zone 的 router 互相看不见对方
+    # 布线 —— MCHPRS 实测 zone(1,0) 的 n14 wire (92,0,18) 与 zone(0,0) 的 n7
+    # feed (92,0,19) 相邻串扰，而各 zone 独立计数 0（跨 zone 短路结构性漏检）。
+    # 修复：迭代重布，把其他 zone 已布线的 wire 注入本 zone 的 occupancy（hard
+    # blocker），直到跨 zone 短路=0。
     def route_locals(self, local: List[str], reserved: Set[XZ], rounds=2,
-                     global_vox: Dict[Pos, str] = None):
+                     global_vox: Dict[Pos, str] = None,
+                     isolation_passes: int = 4):
         by_zone: Dict[tuple, List[str]] = {}
         for n in local:
             s = self.pl.net_sources[n]
             by_zone.setdefault(self._zone(s[0], s[2]), []).append(n)
-        out = []
-        for z, nets in sorted(by_zone.items()):
-            sub = copy.copy(self.pl)
-            sub.net_sinks = {n: self.pl.net_sinks[n] for n in nets}
-            sub.net_sources = {n: self.pl.net_sources[n] for n in nets}
-            # the trunk columns are occupied ground for the plane router
-            sub.occupancy = set(self.pl.occupancy) | \
-                {(x, self.base_y, zz) for (x, zz) in reserved}
-            r = BuildableRouter(sub, margin=16, global_vox=global_vox)
-            rr = r.route(verbose=False, max_rounds=rounds)
-            sh, _ = r._count_shorts(rr)
-            out.append((z, nets, rr, sh))
-        return out
+        zones = sorted(by_zone.items())
+        wires_by_zone: Dict[tuple, Set[XZ]] = {z: set() for z, _ in zones}
+        best = None
+        best_key = None
+        for _pass in range(isolation_passes):
+            out = []
+            this_pass: Dict[tuple, Set[XZ]] = {z: set() for z, _ in zones}
+            for z, nets in zones:
+                sub = copy.copy(self.pl)
+                sub.net_sinks = {n: self.pl.net_sinks[n] for n in nets}
+                sub.net_sources = {n: self.pl.net_sources[n] for n in nets}
+                # the trunk columns are occupied ground for the plane router
+                sub.occupancy = set(self.pl.occupancy) | \
+                    {(x, self.base_y, zz) for (x, zz) in reserved}
+                # 分区隔离带：zone 边界两侧 1 格禁布，跨 zone 相邻在物理上
+                # 不可能（双方都离边界 >= 1 格，最小间距 2 格）。
+                # zone box 也限制到本 zone 范围 ± margin，线不越界乱跑。
+                xa, za = z
+                wx0, wx1 = xa * self.W, (xa + 1) * self.W
+                wz0, wz1 = za * self.Wz, (za + 1) * self.Wz
+                # 只禁边界外侧 1 格列/行：本 zone 线止于 wx1-1，邻 zone 线始于
+                # wx1+1，最小间距 2 格 → 跨 zone 相邻在物理上不可能。
+                for gz in range(wz0 - 1, wz1 + 2):
+                    for gx in (wx0 - 1, wx1):
+                        sub.occupancy.add((gx, self.base_y, gz))
+                for gx in range(wx0 - 1, wx1 + 2):
+                    for gz in (wz0 - 1, wz1):
+                        sub.occupancy.add((gx, self.base_y, gz))
+                sub.bounds = ((wx0 - 16, self.base_y, wz0 - 16),
+                              (min(wx1 + 16, self.pl.bounds[1][0]),
+                               self.pl.bounds[1][1],
+                               min(wz1 + 16, self.pl.bounds[1][2])))
+                # OTHER zones' wires (previous pass's full set + this pass's
+                # earlier zones) are hard blockers — but never this zone's own
+                # wires: it re-lays them from scratch each pass.
+                for z2 in this_pass:
+                    if z2 != z:
+                        for (fx, fz) in (wires_by_zone[z2] | this_pass[z2]):
+                            sub.occupancy.add((fx, self.base_y, fz))
+                r = BuildableRouter(sub, margin=16, global_vox=global_vox)
+                rr = r.route(verbose=False, max_rounds=rounds)
+                sh, _ = r._count_shorts(rr)
+                out.append((z, nets, rr, sh))
+                w: Set[XZ] = set()
+                for n in nets:
+                    for p in rr.wires.get(n, ()):
+                        w.add((p[0], p[2]))
+                    for (pos, _f) in rr.repeaters.get(n, ()):
+                        w.add((pos[0], pos[2]))
+                this_pass[z] = w
+            cross = self._cross_zone_shorts(out)
+            wires_by_zone = this_pass
+            key = (cross,
+                   sum(s for _z, _n, _rr, s in out),
+                   -sum(len(n) - len(rr.failed) for _z, n, rr, _s in out))
+            if best_key is None or key < best_key:
+                best_key = key
+                best = out
+            if cross == 0 and all(s == 0 for _z, _n, _rr, s in out) \
+                    and all(not rr.failed for _z, _n, rr, _s in out):
+                return out
+        return best
+
+    def _cross_zone_shorts(self, out):
+        """Merge every zone's wire/repeater ownership and count foreign
+        8-neighbourhood pairs ACROSS zones (each zone's own counter cannot see
+        the neighbours' wires in the margin-overlap band). Also counts a cell
+        owned by two different nets (overlap)."""
+        owner: Dict[Pos, str] = {}
+        rep_face: Dict[Pos, str] = {}
+        overlap = 0
+        for _z, _nets, rr, _sh in out:
+            for p, o in rr.wire_owner.items():
+                if p in owner and owner[p] != o:
+                    overlap += 1
+                owner[p] = o
+            for net, reps in (rr.repeaters or {}).items():
+                for (pos, f) in reps:
+                    if pos in owner and owner[pos] != net:
+                        overlap += 1
+                    owner[pos] = net
+                    rep_face[pos] = f
+        _REP_AXIS = {"west": {(1, 0), (-1, 0)}, "east": {(1, 0), (-1, 0)},
+                     "north": {(0, 1), (0, -1)}, "south": {(0, 1), (0, -1)}}
+
+        def couples(a, b, off):
+            if a in rep_face and off not in _REP_AXIS[rep_face[a]]:
+                return False
+            boff = (-off[0], -off[1])
+            if b in rep_face and boff not in _REP_AXIS[rep_face[b]]:
+                return False
+            return True
+        seen = set()
+        for (x, y, z), net in owner.items():
+            for dx, dz in _PLANE_SHELL:
+                q = (x + dx, y, z + dz)
+                o = owner.get(q)
+                if o is not None and o != net and couples((x, y, z), q, (dx, dz)):
+                    seen.add(tuple(sorted([(x, y, z), q])))
+            for dy in (1, -1):
+                q = (x, y + dy, z)
+                o = owner.get(q)
+                if o is not None and o != net:
+                    seen.add(tuple(sorted([(x, y, z), q])))
+        return len(seen) + overlap
 
     # ---------- driver ----------
     def run(self, rounds=2, verbose=True):
@@ -507,6 +730,7 @@ class GlobalFirstRouter:
                                               for p, gv in g.blocks.items()})
         loc_ok = sum(len(nets) - len(rr.failed) for _z, nets, rr, _s in zres)
         loc_short = sum(s for *_x, s in zres)
+        cross_short = self._cross_zone_shorts(zres)
         loc_wire = sum(rr.total_wires() for _z, _n, rr, _s in zres)
         if verbose:
             print(f"  global: {len(g.routed)}/{len(glob)} routed, "
@@ -517,6 +741,7 @@ class GlobalFirstRouter:
             "nets": len(nets), "local": len(local), "global": len(glob),
             "global_routed": len(g.routed), "global_failed": g.failed[:8],
             "local_routed": loc_ok, "local_shorts": loc_short,
+            "cross_shorts": cross_short,
             "total_routed": len(g.routed) + loc_ok,
             "global_blocks": len(g.blocks), "local_wires": loc_wire,
             "secs": round(time.time() - t0, 1),
@@ -545,7 +770,9 @@ def route_adaptive(placement, rounds=2, verbose=False,
         r = GlobalFirstRouter(placement, zone_width=W, zone_depth=Wz)
         rep, g, zres = r.run(rounds=rounds, verbose=False)
         rep["zone_width"], rep["zone_depth"] = W, Wz
-        complete = (rep["total_routed"] == rep["nets"] and rep["local_shorts"] == 0)
+        complete = (rep["total_routed"] == rep["nets"]
+                    and rep["local_shorts"] == 0
+                    and rep.get("cross_shorts", 0) == 0)
         if verbose:
             print(f"    W={W:3d} Wz={Wz:3d}: routed {rep['total_routed']}/{rep['nets']} "
                   f"local={rep['local']} global={rep['global']} "

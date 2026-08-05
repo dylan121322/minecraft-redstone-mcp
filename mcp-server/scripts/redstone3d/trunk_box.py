@@ -81,6 +81,15 @@ class TrunkBox:
         # pattern, so adjacent nets always landed on the same column (measured:
         # n2's torch at (3,5,31) collided with n4's cross-leg repeater there).
         cx = self.climb_x if self.climb_x >= 0 else (sx + (3 if sz % 2 else 2))
+        # climb jog: the source repeater's output lands at (sx+2, base, sz), so
+        # when the router assigns a climb column further east (measured: n2's
+        # climb_x=5, and the ladder's base block at (5,0,31) never saw the
+        # repeater's output at (2,0,31) — the whole trunk stayed dark), walk
+        # plain dust from the repeater output to the ladder's base block. These
+        # cells sit on the base plane; the router reserves the column so the
+        # plane router routes around them.
+        for xj in range(sx + 2, cx):
+            body[(xj, base, sz)] = W
         span = self.plane - 1 - base
         assert span % 2 == 0, "climb needs an even span"
         self.torches = span // 2
