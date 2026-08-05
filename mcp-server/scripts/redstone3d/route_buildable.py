@@ -628,10 +628,13 @@ class BuildableRouter:
             self.support1 = snap1
             self.owner_cross = snap_oc
             self.rep_cells = snap_rep
-            # climbed must be restored WHOLE: a failed later sink otherwise wipes
-            # the tower an EARLIER sink of the same net already built (they share
-            # the dict), so the next sink re-climbs onto a stale cross layer and
-            # the run flies into empty air (review finding #2).
+            # Restore `climbed` wholesale so a later sink's failed attempt cannot
+            # wipe the tower an EARLIER sink of the same net already built (they
+            # share the dict). A/B-measured on alu1/Control/Mux2to1: identical
+            # results either way, because the outer retry loop's own
+            # `climbed.pop(net)` already covers the cases these modules hit. Kept
+            # as defence for multi-sink nets that the current set does not
+            # exercise — NOT claimed as a measured win.
             climbed.clear(); climbed.update(snap_climbed)
         return res
 
