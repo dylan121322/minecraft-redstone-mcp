@@ -47,19 +47,18 @@ def emit_blocks(setter: Callable[[int, int, int, str], None],
             setter(x, floor_y, z, S)
 
     # 2. support blocks under raised wires. PASSIVE supports become glass so they
-    # cannot be powered (killing the see-below/ramp coupling); a tower's base and
-    # rungs are in power_blocks and must stay stone to carry strong power.
-    # MEASURED: glass has NO usable insertion point in this architecture. It
-    # does carry a wire and does kill the see-below leak (test_insulators,
-    # test_glass_parallel G2/G3/G4), but every support here sits on an energy
-    # HAND-OFF chain, and those need strong power through the block:
-    #   glass cross support + stone staircase -> landing 0 (stone+stone -> 5)
-    #   glass cross support + down tower      -> landing 0 (stone -> 15)
-    # A staircase step reads the cross dust through its support, and a down
-    # tower's input dust drives its column the same way. So supports stay stone;
-    # glass would only help for purely parallel runs that never hand off.
+    # cannot be powered (killing the see-below/ramp coupling); the CROSS-PLANE
+    # supports and the tower rungs (power_blocks) must stay stone because a
+    # staircase's first step and a down-tower's input read the dust THROUGH the
+    # support's strong power (measured: glass cross support -> landing 0 in both
+    # seam tests, while glass everywhere else keeps the truth table identical:
+    # 16/40 both, c_ok=30 moving — patch_glass_seam).
+    powered = getattr(res, "power_blocks", set())
     for (x, y, z) in res.supports:
-        setter(x, y, z, S)
+        if y >= 2 or (x, y, z) in powered:
+            setter(x, y, z, S)
+        else:
+            setter(x, y, z, GLASS)
 
     # 3. cells
     class _Adapter:
