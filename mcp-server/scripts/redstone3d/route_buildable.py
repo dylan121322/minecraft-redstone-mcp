@@ -63,6 +63,9 @@ class BuildResult:
     # specific facing, unlike the plain standing torches of the 1x1 up tower.
     wall_torches: List[Tuple[Pos, str]] = field(default_factory=list)
     wall_torch_nets: Dict[Pos, str] = field(default_factory=dict)
+    # Blocks that MUST remain powerable (tower bases and rungs). Everything else
+    # in `supports` is passive and is emitted as non-conductive glass.
+    power_blocks: Set[Pos] = field(default_factory=set)
     # torch/wall_torch constructors are positional in _materialize; keep their
     # declared type as a plain field default so BuildResult(...) arity is stable.
 
@@ -1456,7 +1459,8 @@ class BuildableRouter:
     def _materialize(self, nets, placements, bridges):
         res = BuildResult({}, set(), {}, dict(bridges), [], {},
                           torches=[], torch_nets={},
-                          wall_torches=[], wall_torch_nets={})
+                          wall_torches=[], wall_torch_nets={},
+                          power_blocks=set())
         for net in nets:
             res.wires[net] = set()
             res.repeaters[net] = []
@@ -1466,8 +1470,18 @@ class BuildableRouter:
                     res.wires[net].add((pl[1], pl[2], pl[3]))
                 elif role == "rep":
                     res.repeaters[net].append(((pl[1], pl[2], pl[3]), pl[4]))
-                elif role in ("block", "support"):
+                elif role == "support":
+                    # PASSIVE support: only holds a raised wire. These become
+                    # non-conductive glass in the emitter so the see-below/ramp
+                    # coupling through them disappears (measured in
+                    # test_insulators / test_glass_parallel).
                     res.supports.add((pl[1], pl[2], pl[3]))
+                elif role == "block":
+                    # FUNCTIONAL block: a tower's base/rung must be POWERABLE
+                    # (a repeater strongly powers it, a standing torch on top
+                    # reads it), so it must stay stone.
+                    res.supports.add((pl[1], pl[2], pl[3]))
+                    res.power_blocks.add((pl[1], pl[2], pl[3]))
                 elif role == "torch":
                     res.torches.append((pl[1], pl[2], pl[3]))
                     res.torch_nets[(pl[1], pl[2], pl[3])] = net

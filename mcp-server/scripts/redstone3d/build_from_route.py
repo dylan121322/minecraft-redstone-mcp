@@ -11,6 +11,17 @@ from route_buildable import BuildResult
 W = "minecraft:redstone_wire"
 S = "minecraft:stone"
 RBLOCK = "minecraft:redstone_block"
+# NON-CONDUCTIVE support. Measured (riscv_build/test_insulators.py): glass,
+# stained glass, smooth_stone_slab and glowstone all carry a redstone wire
+# normally yet CANNOT be powered, so the see-below / ramp coupling through the
+# support block disappears:
+#     stone support : victim one level down and one across reads 12  (leaks)
+#     glass support : victim reads 0                                 (isolated)
+# And with glass supports, two feed cells two apart in z with the middle cell
+# empty are fully isolated (test_glass_parallel G4), which is exactly the
+# geometry that forced the huge keep-outs. Towers still need a POWERABLE block
+# for their base and rungs, so only the passive supports become glass.
+GLASS = "minecraft:glass"
 
 
 def emit_blocks(setter: Callable[[int, int, int, str], None],
@@ -26,11 +37,27 @@ def emit_blocks(setter: Callable[[int, int, int, str], None],
     fx0, fx1 = min(xs) - 2, max(xs) + 2
     fz0, fz1 = min(zs) - 2, max(zs) + 2
     floor_y = mn[1] - 1
+    # The floor stays STONE. Making it glass was measured to be worse
+    # (both-correct 16/40 -> 10/40, cout went from moving to stuck): the gate
+    # cells rely on the floor for strong power — a wall torch's mount and the
+    # repeater input pins sit on it — so a non-conductive floor breaks the cells
+    # themselves. Only the RAISED passive supports become glass.
     for x in range(fx0, fx1 + 1):
         for z in range(fz0, fz1 + 1):
             setter(x, floor_y, z, S)
 
-    # 2. support blocks under raised wires
+    # 2. support blocks under raised wires. PASSIVE supports become glass so they
+    # cannot be powered (killing the see-below/ramp coupling); a tower's base and
+    # rungs are in power_blocks and must stay stone to carry strong power.
+    # MEASURED: glass has NO usable insertion point in this architecture. It
+    # does carry a wire and does kill the see-below leak (test_insulators,
+    # test_glass_parallel G2/G3/G4), but every support here sits on an energy
+    # HAND-OFF chain, and those need strong power through the block:
+    #   glass cross support + stone staircase -> landing 0 (stone+stone -> 5)
+    #   glass cross support + down tower      -> landing 0 (stone -> 15)
+    # A staircase step reads the cross dust through its support, and a down
+    # tower's input dust drives its column the same way. So supports stay stone;
+    # glass would only help for purely parallel runs that never hand off.
     for (x, y, z) in res.supports:
         setter(x, y, z, S)
 
