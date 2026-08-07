@@ -52,6 +52,21 @@ def _wt(facing="east"):
 
 W = "minecraft:redstone_wire"
 S = "minecraft:stone"
+TARGET = "minecraft:target"
+def _repw():
+    return "minecraft:repeater[facing=west,delay=1]"
+
+
+def _target_stage(B, qx, qy, qz):
+    """Append the TARGET output stage at (qx+1..qx+3): repeater reads the classic
+    Q dust, drives a target, the net reads the target's output dust at qx+3.
+    The target makes the output readable but not back-drivable — a downstream
+    net can never force this gate's output, and a stray wire near the output
+    cannot couple into the gate. Verified 4/4 on all cells
+    (riscv_build/test_cell_target_stage.py)."""
+    B(qx + 1, qy, qz, _repw())
+    B(qx + 2, qy, qz, TARGET)
+    B(qx + 3, qy, qz, W)
 
 
 # ---------------------------------------------------------------------------
@@ -68,9 +83,10 @@ def _emit_not(schem, ox, oy, oz):
     B(0, 0, 0, REP_W)      # input pin (repeater)
     B(1, 0, 0, S)          # mount
     B(2, 0, 0, _wt())      # wall torch (inverts)
-    B(3, 0, 0, W)          # output pin
+    B(3, 0, 0, W)          # internal output
+    _target_stage(B, 3, 0, 0)   # repeater->target->Q at (4..6)
 
-NOT = Cell("NOT", 4, 2, 1, {"A": (0, 0, 0)}, {"Q": (3, 0, 0)}, _emit_not)
+NOT = Cell("NOT", 7, 2, 1, {"A": (0, 0, 0)}, {"Q": (6, 0, 0)}, _emit_not)
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +98,9 @@ def _emit_buf(schem, ox, oy, oz):
     B(0, 0, 0, W)
     B(1, 0, 0, "minecraft:repeater[facing=west,delay=1]")  # facing=west: input from west
     B(2, 0, 0, W)
+    _target_stage(B, 2, 0, 0)
 
-BUF = Cell("BUF", 3, 1, 1, {"A": (0, 0, 0)}, {"Q": (2, 0, 0)}, _emit_buf)
+BUF = Cell("BUF", 6, 1, 1, {"A": (0, 0, 0)}, {"Q": (5, 0, 0)}, _emit_buf)
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +113,9 @@ def _emit_or(schem, ox, oy, oz):
     B(1, 0, 0, W); B(1, 0, 2, W)
     B(1, 0, 1, W)      # junction column
     B(2, 0, 1, W)
+    _target_stage(B, 2, 0, 1)
 
-OR = Cell("OR", 3, 1, 3, {"A": (0, 0, 0), "B": (0, 0, 2)}, {"Q": (2, 0, 1)}, _emit_or)
+OR = Cell("OR", 6, 1, 3, {"A": (0, 0, 0), "B": (0, 0, 2)}, {"Q": (5, 0, 1)}, _emit_or)
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +133,9 @@ def _emit_and(schem, ox, oy, oz):
     B(4, 0, 1, W)                                # straight segment (strong power)
     B(5, 0, 1, S); B(6, 0, 1, _wt())             # final NOT
     B(7, 0, 1, W)                                # output
+    _target_stage(B, 7, 0, 1)
 
-AND = Cell("AND", 8, 2, 3, {"A": (0, 0, 0), "B": (0, 0, 2)}, {"Q": (7, 0, 1)}, _emit_and)
+AND = Cell("AND", 11, 2, 3, {"A": (0, 0, 0), "B": (0, 0, 2)}, {"Q": (10, 0, 1)}, _emit_and)
 
 
 # ---------------------------------------------------------------------------
@@ -124,12 +143,21 @@ AND = Cell("AND", 8, 2, 3, {"A": (0, 0, 0), "B": (0, 0, 2)}, {"Q": (7, 0, 1)}, _
 #   A @ (0,0,0)  B @ (0,0,2)  Q @ (10,0,1)
 # ---------------------------------------------------------------------------
 def _emit_nand(schem, ox, oy, oz):
-    _emit_and(schem, ox, oy, oz)
+    # standalone NAND (does NOT reuse _emit_and, which has its own target stage):
+    # AND core + extra NOT + target stage. Q at (13,0,1).
     B = lambda dx, dy, dz, blk: schem.set_block_from_string(ox+dx, oy+dy, oz+dz, blk)
-    B(8, 0, 1, S); B(9, 0, 1, _wt())             # NOT the AND output
-    B(10, 0, 1, W)
+    B(0, 0, 0, REP_W); B(0, 0, 2, REP_W)
+    B(1, 0, 0, S); B(2, 0, 0, _wt())
+    B(1, 0, 2, S); B(2, 0, 2, _wt())
+    B(3, 0, 0, W); B(3, 0, 2, W); B(3, 0, 1, W)
+    B(4, 0, 1, W)
+    B(5, 0, 1, S); B(6, 0, 1, _wt())
+    B(7, 0, 1, W)                                # AND output
+    B(8, 0, 1, S); B(9, 0, 1, _wt())             # extra NOT
+    B(10, 0, 1, W)                               # NAND output (pre-stage)
+    _target_stage(B, 10, 0, 1)
 
-NAND = Cell("NAND", 11, 2, 3, {"A": (0, 0, 0), "B": (0, 0, 2)}, {"Q": (10, 0, 1)}, _emit_nand)
+NAND = Cell("NAND", 14, 2, 3, {"A": (0, 0, 0), "B": (0, 0, 2)}, {"Q": (13, 0, 1)}, _emit_nand)
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +170,10 @@ def _emit_nor(schem, ox, oy, oz):
     B(1, 0, 0, W); B(1, 0, 2, W)
     B(1, 0, 1, W); B(2, 0, 1, W)                 # OR junction + straight seg
     B(3, 0, 1, S); B(4, 0, 1, _wt())             # NOT
-    B(5, 0, 1, W)
+    B(5, 0, 1, W)                                # output
+    _target_stage(B, 5, 0, 1)
 
-NOR = Cell("NOR", 6, 2, 3, {"A": (0, 0, 0), "B": (0, 0, 2)}, {"Q": (5, 0, 1)}, _emit_nor)
+NOR = Cell("NOR", 9, 2, 3, {"A": (0, 0, 0), "B": (0, 0, 2)}, {"Q": (8, 0, 1)}, _emit_nor)
 
 
 LIBRARY = {c.gtype: c for c in [NOT, BUF, OR, AND, NAND, NOR]}
