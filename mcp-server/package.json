@@ -1,64 +1,64 @@
 {
-    "name": "@fundamentallabs/minecraft-mcp",
-    "version": "0.2.21",
-    "description": "MCP (Model Context Protocol) server for Minecraft bot skills - Control Minecraft bots through AI agents",
-    "keywords": [
-        "mcp",
-        "minecraft",
-        "mineflayer",
-        "bot",
-        "ai",
-        "model-context-protocol",
-        "FundamentalLabs"
-    ],
-    "homepage": "https://github.com/FundamentalLabs/minecraft-mcp#readme",
-    "bugs": {
-        "url": "https://github.com/FundamentalLabs/minecraft-mcp/issues"
-    },
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/FundamentalLabs/minecraft-mcp.git"
-    },
-    "license": "MIT",
-    "author": "Fundamental Labs, Inc.",
-    "type": "module",
-    "main": "./dist/mcp-server.js",
-    "bin": {
-        "minecraft-mcp": "./dist/mcp-server.js"
-    },
-    "files": [
-        "dist",
-        "src",
-        "tsconfig.json",
-        "README.md",
-        "LICENSE"
-    ],
-    "scripts": {
-        "build": "tsc && chmod +x dist/mcp-server.js",
-        "dev": "tsc --watch",
-        "start": "node dist/mcp-server.js",
-        "test": "echo \"No tests yet\""
-    },
-    "dependencies": {
-        "@modelcontextprotocol/sdk": "^0.6.0",
-        "mineflayer": "^4.14.0",
-        "mineflayer-pathfinder": "^2.4.0",
-        "mineflayer-pvp": "^1.3.0",
-        "mineflayer-tool": "^1.2.0",
-        "mineflayer-collectblock": "^1.4.0",
-        "commander": "^11.1.0",
-        "fastest-levenshtein": "^1.0.16",
-        "jimp": "^0.22.12",
-        "axios": "^1.6.0"
-    },
-    "devDependencies": {
-        "@types/node": "^20.11.24",
-        "typescript": "^5.3.3"
-    },
-    "engines": {
-        "node": ">=18.0.0"
-    },
-    "publishConfig": {
-        "access": "public"
-    }
+  "name": "@fundamentallabs/minecraft-mcp",
+  "version": "0.2.22",
+  "description": "MCP (Model Context Protocol) server for Minecraft bot skills - Control Minecraft bots through AI agents",
+  "keywords": [
+    "mcp",
+    "minecraft",
+    "mineflayer",
+    "bot",
+    "ai",
+    "model-context-protocol",
+    "FundamentalLabs"
+  ],
+  "homepage": "https://github.com/FundamentalLabs/minecraft-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/FundamentalLabs/minecraft-mcp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FundamentalLabs/minecraft-mcp.git"
+  },
+  "license": "MIT",
+  "author": "Fundamental Labs, Inc.",
+  "type": "module",
+  "main": "./dist/mcp-server.js",
+  "bin": {
+    "minecraft-mcp": "./dist/mcp-server.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "tsconfig.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/mcp-server.js",
+    "dev": "tsc --watch",
+    "start": "node dist/mcp-server.js",
+    "test": "echo \"No tests yet\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.6.0",
+    "mineflayer": "^4.14.0",
+    "mineflayer-pathfinder": "^2.4.0",
+    "mineflayer-pvp": "^1.3.0",
+    "mineflayer-tool": "^1.2.0",
+    "mineflayer-collectblock": "^1.4.0",
+    "commander": "^11.1.0",
+    "fastest-levenshtein": "^1.0.16",
+    "jimp": "^0.22.12",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

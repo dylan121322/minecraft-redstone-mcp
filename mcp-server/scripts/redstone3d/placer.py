@@ -142,21 +142,22 @@ def place(netlist: dict, origin: Pos = (0, 0, 0),
             out_pins = {p: cell.output_abs(p, cx, cy, cz) for p in cell.outputs}
             placed[cname] = PlacedCell(cname, gtype, cell, (cx, cy, cz), in_pins, out_pins)
 
-            # nets. The SOURCE is exposed one cell EAST of the real output pin:
-            # a 2-input cell is depth=3 with its output Q on the middle row, so
-            # the pin itself is sandwiched by the cell's own input rows and has
-            # exactly ONE escape lane (+x). Measured: 23/31 sources were starved
-            # that way, which deadlocks routing (two nets fighting for the same
-            # single lane, unfixable by negotiation). Publishing the source one
-            # step east — on open ground beyond the cell — gives every net 3
-            # escape lanes. `out_stubs` records the 1-cell dust the emitter must
-            # add to join the real pin to the published source.
+            # nets. The SOURCE is exposed TWO cells east of the real output pin,
+            # joined by a repeater[facing=west] one cell east of the pin:
+            #   Q dust -> repeater -> source dust (op+2)
+            # The repeater's sides are isolated (measured P9), so the source
+            # dust gets its 3 escape lanes back (north/south/east) even with the
+            # 1-cell cell keep-out in effect — the old op+1 source had exactly
+            # one lane and soft-repairs of dropped nets found no route at all
+            # (n30 got no placements). `out_stubs` records
+            # (real output pin, repeater pos, published source).
             for pin, net in cdata.get("outputs", {}).items():
                 if pin in out_pins:
                     op = out_pins[pin]
-                    ex = (op[0] + 1, op[1], op[2])
+                    rp = (op[0] + 1, op[1], op[2])
+                    ex = (op[0] + 2, op[1], op[2])
                     net_sources[net] = ex
-                    out_stubs.append((op, ex))
+                    out_stubs.append((op, rp, ex))
             for pin, net in cdata.get("inputs", {}).items():
                 if pin in in_pins:
                     net_sinks.setdefault(net, []).append(in_pins[pin])

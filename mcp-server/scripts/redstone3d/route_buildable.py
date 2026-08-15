@@ -1488,8 +1488,15 @@ class BuildableRouter:
                 elif role == "wtorch":
                     res.wall_torches.append(((pl[1], pl[2], pl[3]), pl[4]))
                     res.wall_torch_nets[(pl[1], pl[2], pl[3])] = net
-            # repeater insertion on long flat dust runs (source-ordered)
-            self._insert_repeaters(net, placements[net], res)
+            # repeater insertion: flow-directed, power-aware, all layers
+            # (refresh3d — the old per-layer BFS seeded from the source's xz
+            # never reached via-fed raised segments, so they decayed to 0).
+            import refresh3d
+            src3 = self.pl.net_sources.get(net)
+            if src3 is not None:
+                refresh3d.insert(net, placements[net], src3,
+                                 self.pl.net_sinks.get(net, []),
+                                 res.wires[net], res.repeaters[net])
             for p in res.wires[net]:
                 res.wire_owner[p] = net
             for (pos, _f) in res.repeaters[net]:
@@ -1561,22 +1568,22 @@ class BuildableRouter:
         return res
 
     def _insert_repeaters(self, net, pls, res):
-        """Insert refresh repeaters on long y0 runs, oriented by the REAL signal
-        flow.
+        """Insert refresh repeaters on long runs, oriented by the REAL signal
+        flow, on EVERY signal layer (y0, y2, y4, ...). The multi-layer router
+        puts long net segments upstairs; refreshing only y0 decayed the upper
+        segments to 0 and stuck every output (measured: 29/29 nets wired,
+        29 residual shorts, still both outputs frozen)."""
 
-        The previous version walked `placements` in list order and took the
-        direction to the next listed cell. Placement order is not flow order (a
-        net's sinks are routed one after another, so the list jumps around), which
-        produced repeaters facing a direction the signal never comes from — e.g.
-        n8 got repeater(facing=west) at (0,95) while its signal ran north from
-        (0,96), so the repeater never conducted and the whole net was dead.
-
-        Instead: BFS the net's own y0 cells outward from the source to build a
-        parent->child tree (true flow), then every MAX_RUN hops replace that cell
-        with a repeater facing the REVERSE of travel (a repeater reads the side it
-        faces): +x -> west, -x -> east, +z -> north, -z -> south.
-        """
         y0 = self.base_y
+        layers = sorted({p[2] for p in pls if p[0] == "dust"})
+        # a via's interior dust sits on odd layers (rise steps); it is
+        # refreshed by the via's own repeater — only even signal layers run
+        layers = [y for y in layers if (y - y0) % 2 == 0]
+        for y in layers:
+            self._insert_repeaters_layer(net, pls, res, y)
+
+    def _insert_repeaters_layer(self, net, pls, res, y0):
+        """One signal layer's refresh pass (see _insert_repeaters)."""
         # Preferred path: use the ORDERED per-sink paths recorded during routing.
         # Orientation then follows real travel, which the BFS-tree reconstruction
         # got wrong on multi-sink nets.
@@ -1593,8 +1600,13 @@ class BuildableRouter:
         if src is None:
             return
         start = (src[0], src[2])
-        # BFS over the net's own y0 cells (the source pin itself may not be a cell)
-        depth = {}
+        # BFS over the net's own y0 cells. The source cell may itself be in
+        # `cells` (a net whose routed tree starts right on its source); if so,
+        # the wavefront must NOT be allowed to diffuse back onto it — that made
+        # start and its first hop each other's parent in the children graph
+        # (a 2-cycle), and the repeater walk spun forever on a 17-cell net.
+        # Marking it visited up front keeps the BFS a tree.
+        depth = {start: 0}
         q = deque()
         for dx, dz in _H:
             n0 = (start[0]+dx, start[1]+dz)
