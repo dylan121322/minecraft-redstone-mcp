@@ -1,80 +1,68 @@
-# Minecraft Redstone MCP — AI 驱动的红石电路设计、仿真与建造系统
+# Minecraft Redstone MCP — 红石电路设计、仿真与游戏内建造系统
 
-基于 [FundamentalLabs/minecraft-mcp](https://github.com/FundamentalLabs/minecraft-mcp) 的扩展，为 AI Agent 添加红石电路的结构化设计、仿真验证和游戏内自动建造能力。
+基于 [FundamentalLabs/minecraft-mcp](https://github.com/FundamentalLabs/minecraft-mcp) 的扩展，提供红石电路的结构化设计、MCHPRS 物理仿真验证和游戏内自动建造能力。已验证的最大成果：**23 门 alu1（AND/OR/XOR/SUB 五操作 ALU）完整布线，MCHPRS 40 向量全对，游戏内 /setblock 实建后真值表 40/40 通过**。
 
 ## 架构
 
 ```
-Verilog/VHDL → yosys 综合 → 门级网表 → 三维布局 → 迷宫布线 → 分层验证 → litematic/schematic
-                                              ↓
-                                     nucleation MCHPRS 物理仿真
-                                              ↓
-                               SKILL.md (红石知识库 + 建造约束)
+Verilog → yosys 综合 → 门级网表 → 拓扑布局 → 3D 协商式布线（PathFinder3D）
+                                    ↓
+                           nucleation MCHPRS 物理仿真（真值表）
+                                    ↓
+                     export_solution → bot /setblock 实建 → 游戏内真值表
 ```
 
-**核心管道**：源代码 → 提取单元 → 红石代码重构 → 模拟 → 可建造输出。
+**核心管道**：源代码 → 提取单元 → 红石重建 → 模拟验证 → 游戏内建造。同一份布线结果同时用于 MCHPRS 仿真与游戏实建，保证"验证的就是建造的"。
 
 ## 三层能力体系
 
-### 1. 知识层（SKILL.md 1485 行）
-- 红石元件速查表（40+ 元件）
+### 1. 知识层（docs/SKILL.md）
+- 红石元件速查表与红石时序常量
 - 结构化电路编码格式（JSON schema，含真值表/时序）
-- 标准电路目录（JSON 模板，NOT/AND/OR/XOR/RS锁存/T触发器/全加器）
-- **建造约束与语法限制**：玻璃基底隔离、门间隔离、/setblock 命令速率、MC-31100 修复（Forge mod）、验证陷阱、**MCHPRS 仿真规则**（5 条实测）、区块加载约束
-- **三维综合管道规则**：yosys 集成、分层验证、dust 密度 O(N²) 等
+- 标准电路目录（NOT/AND/OR/XOR/RS锁存/T触发器/全加器等）
+- **建造约束与实测规则**：基底隔离、门间隔离、/setblock 命令速率与顺序、MCHPRS 仿真规则、区块加载约束、三维布线实测规则（via 塔、楼梯斜降、中继器刷新）
 
 ### 2. 仿真层（nucleation MCHPRS + 行为级 + 分层验证）
 | 仿真方式 | 用途 | 规模上限 |
 |---------|------|---------|
-| MCHPRS 块级真红石仿真 | 单门/小电路物理验证（NOT 2/2、AND/OR/NAND/NOR 4/4） | ≤ 几门 |
+| MCHPRS 块级真红石仿真 | 单门/小电路物理验证（6 标准单元各 4/4） | ≤ 几门 |
+| MCHPRS 整体仿真 | 整模块真值表（alu1 40 向量） | 数千块 |
 | 行为级逻辑仿真 | netlist 功能验证（组合逻辑精确） | 无上限 |
-| 分层验证（物理+逻辑） | 大规模电路绕过 redpiler 密度瓶颈：物理层每个 cell 独立 MCHPRS 验证 + 逻辑层 netlist 行为仿真 | **无上限** |
 
 ### 3. 执行层
 | 方式 | 适用场景 |
 |------|---------|
-| Mineflayer Bot + /setblock | 小到中电路（命令速率 200ms/条，距离 ≤210 格） |
-| litematic 导出 | 任意规模（游戏内一次性粘贴，绕过命令速率/距离限制） |
+| Mineflayer Bot + /setblock | 已验证可建整块 alu1（3.3 万块，多 bot 持载区块 + 150ms 命令间隔） |
+| litematic 导出 | 任意规模一次性粘贴 |
 | Minecraft Forge mod (1.20.1/1.21.4) | 修复 MC-31100（/setblock 红石元件不激活） |
 
 ## 验证结果
 
-### 游戏内验证（2026-07-25）
-| 电路 | 测试结果 |
-|------|---------|
-| NOT Gate | 2/2 ✅ |
-| AND Gate | 4/4 ✅ |
-| NAND Gate (AND→NOT chain) | 4/4 ✅ |
-| 3-bit 进位计算器 | 4/4 ✅ |
+### alu1（23 门，AND/OR/XOR/SUB）— 2026-08-15
+| 验证 | 结果 |
+|------|------|
+| 布线收敛（29/29 网，0 短路，0 缺网） | ✅ 2 层 83 秒 |
+| MCHPRS 40 向量真值表（y + cout） | **40/40** ✅ |
+| 游戏内 /setblock 实建 + 40 向量真值表 | **40/40** ✅ |
 
-### MCHPRS 物理验证
+### 更早验证
 | 电路 | 测试结果 |
 |------|---------|
 | 6 门标准单元（NOT/BUF/OR/AND/NAND/NOR） | 各 4/4 ✅ |
-| 全加器（层验证：物理+逻辑） | 8/8 ✅ |
-| 8-bit ALU（AND/OR/ADD/XOR/SUB，160 门） | 80/80 ✅ |
-| 2×NOT 链（自动布线） | 2/2 ✅ |
-| 扇出 x→2NOT→OR（自动布线） | 2/2 ✅ |
-
-### RISC-V CPU 编译器（行为仿真）
-| 电路 | 测试结果 |
-|------|---------|
-| 1-bit Full Adder | 4/4 ✅ |
-| 8-bit RCA | 6/6 ✅ |
-| RISC-V 5 级流水线全配置（32 寄存器，6226 门） | 12/12 ✅ |
+| 全加器（物理+逻辑分层验证） | 8/8 ✅ |
+| 8-bit ALU（160 门，行为仿真） | 80/80 ✅ |
+| RISC-V 5 级流水线全配置（6226 门，行为仿真） | 12/12 ✅ |
+| 游戏内单门（NOT/AND/NAND）与 3-bit 进位计算器 | 各 4/4 ✅ |
 
 ## 快速开始
 
 ```bash
-# 依赖
 cd mcp-server && npm install && npm run build
 pip install nucleation
-
-# 可选（Verilog 综合）
-brew install yosys   # macOS
+brew install yosys   # 可选（Verilog 综合）
 ```
 
-Claude Desktop 配置 `claude_desktop_config.json`：
+MCP 配置 `claude_desktop_config.json`：
 ```json
 { "mcpServers": { "minecraft": { "command": "node", "args": ["/path/to/mcp-server/dist/mcp-server.js"] } } }
 ```
@@ -84,60 +72,27 @@ Claude Desktop 配置 `claude_desktop_config.json`：
 `mcp-server/scripts/redstone3d/` 提供完整的三维电路综合管道：
 
 ```
-yosys_frontend.py → yosys abc 工业级综合（全加器 19→7 门，ALU→160 门）
-cell_library.py   → 标准单元库（6 门，MCHPRS 全验证）
-placer.py         → 拓扑分层三维布局（体素防重叠）
-maze_router.py    → Lee 迷宫布线 + rip-up&reroute（协商式拥塞）
-synth.py          → netlist→place→route→schematic
-mchprs_sim.py     → redstone_block 注入式 MCHPRS 仿真（4ms/向量）
-regress.py        → 分层验证（物理+逻辑，突破规模上限）
-verify_alu8.py    → 8-bit ALU 端到端验证
+yosys_frontend.py  → Verilog → 门级网表（netlists.json）
+cell_library.py    → 标准单元库（6 门，MCHPRS 全验证，target 输出级防反向驱动）
+placer.py          → 拓扑分层三维布局（西进东出数据流，体素防重叠）
+pathfinder3d.py    → PathFinder3D 协商式布线（动态层数、via 塔、功率感知馈入检查）
+refresh3d.py       → 流感知中继器插入 + 功率模拟（上层长线不再衰减）
+route_buildable.py → placements → BuildResult（wires/repeaters/supports）
+build_from_route.py→ 统一发射器：MCHPRS 仿真与游戏实建共用
+validate.py        → 40 向量真值表 + 模型-现实一致性对比
+export_solution.py → 布局 → bot 建造 JSON（含悬空支撑审计）
+diag_loaded.py     → 免重布线的门级电气诊断
+fix_floaters.py    → 悬空线局部绕行修补
 ```
 
-## 文件结构
+`riscv_build/` 提供游戏内建造与批量验证：
 
 ```
-├── docs/SKILL.md                       # 红石知识库（1485 行）
-├── mods/                               # Minecraft Forge mod (修复 MC-31100)
-│   ├── forge-1.20.1/
-│   └── forge-1.21.4/
-├── mcp-server/
-│   ├── src/
-│   │   ├── skills/verified/
-│   │   │   ├── buildRedstoneCircuit.ts    # 建造工具
-│   │   │   ├── simulateRedstoneCircuit.ts # 仿真工具
-│   │   │   ├── scanRedstoneCircuit.ts     # 扫描工具
-│   │   │   └── diffRedstoneCircuit.ts     # 差异工具
-│   │   ├── lib/
-│   │   │   ├── terrainDetector.ts         # 地形检测
-│   │   │   ├── redstonePowerRules.ts      # 红石充能规则
-│   │   │   └── redstoneGraph.ts           # 信号图引擎
-│   │   └── skillRegistry.ts
-│   ├── scripts/
-│   │   ├── redstone3d/                    # ★ 三维综合管道
-│   │   │   ├── yosys_frontend.py          # Verilog→门级网表
-│   │   │   ├── cell_library.py            # MCHPRS 标准单元库
-│   │   │   ├── placer.py                  # 三维布局器
-│   │   │   ├── maze_router.py             # Lee 迷宫布线器
-│   │   │   ├── synth.py                   # 综合主管道
-│   │   │   ├── mchprs_sim.py              # MCHPRS 注入式仿真
-│   │   │   ├── regress.py                 # 分层验证
-│   │   │   ├── verify_alu8.py             # ALU 验证
-│   │   │   ├── redstone.lib               # 标准单元 liberty 文件
-│   │   │   └── BUG_nucleation_edges.md    # 调研：非 bug
-│   │   ├── riscv_compiler.py              # RISC-V→红石编译器
-│   │   ├── hdl_compiler.py                # HDL→红石编译器
-│   │   ├── nucleation_bridge.py           # Nucleation 仿真桥接
-│   │   ├── build_riscv_tiny.cjs           # RISC-V Tiny 建造脚本
-│   │   ├── build_riscv_multibot.cjs       # 多 Bot 协同建造
-│   │   ├── build_fib_v1.cjs               # Fibonacci 计算机
-│   │   ├── build_dikc4_v3.cjs             # DIKC-4 CPU
-│   │   ├── build_display_*.cjs            # 显示屏系列
-│   │   └── cpu_simulator.py               # CPU 行为仿真
-│   ├── dist/
-│   ├── package.json
-│   └── tsconfig.json
-└── README.md
+build_alu1.cjs     → bot 实建 + 40 向量真值表（多 bot 持载区块）
+build_verify.cjs   → 通用 bot 建造/验证器
+export_blocks.py   → 模块 → 建造 JSON
+run_one_config.py  → 单配置路由+仿真（Win 批量单元，断线续跑）
+batch_launcher.py  → 多配置并行批量（独立进程，免进程池崩溃）
 ```
 
 ## 建造约束（游戏实测）
@@ -145,19 +100,19 @@ verify_alu8.py    → 8-bit ALU 端到端验证
 | 规则 | 说明 |
 |------|------|
 | `GLASS_BASE` | 玻璃基底隔离，超平坦世界草地全局导电 |
-| `CMD_RATE_LIMIT` | bot.chat 命令 >150ms/条被丢弃（实测：200ms=100%，80ms=14%） |
-| `SETBLOCK_LOAD_RADIUS` | Bot 距目标>210 格 /setblock 静默失败（实测：240格=0/10） |
+| `CMD_RATE_LIMIT` | bot.chat 命令 >150ms/条安全（实测 60ms 丢 ~1% 块、150ms 可靠） |
+| `SETBLOCK_LOAD_RADIUS` | Bot 距目标 >13 区块 /setblock 静默失败 |
 | `NO_COORD_OVERLAP` | 多门布局坐标不可重叠 |
-| `CMD_DELAY` | 命令间最小 200ms 延迟 |
-| `BUILD_ORDER` | Y-1 基底 → Y 石块 → Y+1 火把 |
-| `FANOUT_FROM_WIRE` | 扇出分叉必须从 wire 而非 pin（repeater 不横向导通） |
-| `DIAGONAL_RAMP_SHORT` | 红石线对角斜连：不同 net 对向位置短路 |
-| `NO_FLOATING_DUST` | 悬空红石线（下方无实心块）令 MCHPRS 异常 |
-| `DUST_DENSITY_ON2` | 密集红石粉图边数 O(N²)，布线越密仿真越慢 |
+| `BUILD_ORDER` | 基底 → 石块 → 火把 → 灰（支撑先行） |
+| `NO_FLOATING_DUST` | 非方块类元件不可悬空——游戏内会掉落（MCHPRS 容忍但游戏不） |
+| `DROP_STONE_SUPPORT` | 楼梯斜降起点的灰必须在可充能方块上（玻璃断开斜降：实测 glass=0 / stone=14） |
+| `REFRESH_FLOW` | 上层长线必须流感知插入刷新中继器（每 ≤10 格），否则衰减到 0 |
+| `SETTLE_TIME` | 深链（30+ 中继器）稳定 ≥5s，游戏内测试建议 10s |
+| `CHUNK_HOLDERS` | 超单玩家视界的电路需多个持载 bot；mineflayer 只读本 bot 视界 |
 
 ## MC-31100 修复（Forge Mod）
 
-`mods/` 提供 Forge 1.20.1 和 1.21.4 两个版本的 Mixin mod，修复 `/setblock` 放置红石元件不激活的原生 bug。源码用 Java（Mixin + @Inject + @Invoker），编译后放入 mods 文件夹使用。
+`mods/` 提供 Forge 1.20.1 和 1.21.4 两个版本的 Mixin mod，修复 `/setblock` 放置红石元件不激活的原生 bug。
 
 ## 依赖与致谢
 
@@ -169,7 +124,6 @@ verify_alu8.py    → 8-bit ALU 端到端验证
 | [Yosys](https://github.com/YosysHQ/yosys) | ISC | Verilog 逻辑综合 |
 | [ujjwal-2001/RISCV_8bit_pipeline](https://github.com/ujjwal-2001/RISCV_8bit_pipeline) | - | RISC-V 8-bit 5 级流水线参考 |
 | [qmn/dewey](https://github.com/qmn/dewey) | BSD-2 | PERSHING 红石 P&R 算法参考 |
-| [Mineflayer 生态](https://github.com/PrismarineJS) | MIT | 寻路/PVP/自动工具 |
 
 ## 协议
 
@@ -180,12 +134,7 @@ verify_alu8.py    → 8-bit ALU 端到端验证
 
 ## 已知限制
 
-- 整体布线（rip-up）>100 门偏慢（分钟级），大电路用分层验证免整体仿真
-- 密集红石粉有 O(N²) 图边（dust 全互连的固有语义），整体 MCHPRS 仿真需控制 dust 密度
-- 建造需 Minecraft 开启作弊（`/setblock` 需 OP）
-- 仅支持 Minecraft Java 版 1.20.1+，LAN 连接
-- `set_lever_power`/`set_signal_strength` 等运行时 API 在当前 nucleation 绑定中不驱动网络，需用 redstone_block 注入
-
----
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+- 整体布线（协商式 rip-up）对百门以上电路偏慢；大电路用分层验证或行为仿真先行
+- 密集红石粉有 O(N²) 图边，整体 MCHPRS 仿真需控制 dust 密度
+- 建造需 Minecraft 开启作弊（`/setblock` 需 OP），Java 版 1.20.1+，LAN 或同机连接
+- MCHPRS 容忍悬空元件而游戏会掉落——导出前必须过支撑审计

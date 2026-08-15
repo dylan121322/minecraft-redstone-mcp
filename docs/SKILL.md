@@ -179,6 +179,16 @@ schem.save_to_file("gate.litematic")   # 导出
 | `STRONG_POWER_STRAIGHT` | 灰强充能实体块的前提：该灰是**直线段末端指向该块**；T 形/汇合分支**不**触发强充能 | NOR 汇合后 torch 常亮——必须再加一段单独直线灰指向下级 mount |
 | `OPTIMIZE_FALSE` | 用 `create_with_options(schem, False, False)` | `optimize=True` 可能优化掉无源测试电路 |
 
+**MCHPRS 与真实游戏的关键差异（2026-08-15 实测）**——这些差异曾导致"仿真 40/40 但游戏内 10/40"：
+
+| 规则 | 说明 | 实测 |
+|------|------|------|
+| `MCHPRS_TOLERATES_FLOAT` | MCHPRS **容忍悬空元件**（浮空中继器/浮空灰照常仿真），但真实游戏**立即掉落**成物品。悬空定义：灰/中继器下方不是实心方块（灰下面是灰也算悬空） | 游戏内 72.5,102,219.5 处灰变掉落物 |
+| `DROP_STONE_SUPPORT` | 楼梯斜降（step-down）的**起点灰必须在可充能方块（stone）上**：玻璃支撑断开斜降 | 上层 support=glass → 下级读 0；stone → 14 |
+| `SCHEMATIC_NAME_REUSE` | 同进程内多个 `Schematic.create("t")` 同名会**状态串扰**（后建世界读到旧世界数据） | 同名 4 连测互相污染；每向量用唯一名字 |
+| `REPEATER_PWR_READ` | `get_redstone_power` 在**中继器/石块自身位置返回 0**（报数约定），不代表中继器没导通——看它输出端的灰 | 隔离测试中继器工作正常但自身读 0 |
+| `SETTLE_TICKS` | 深链电路（30+ 中继器）需 **≥80 tick（4s）** 稳定；游戏内测试建议 10s | 5s 稳定时 alu1 26/40，10s 40/40 |
+
 **MCHPRS 验证过的平面 AND（4/4，全 Y=0）**：
 ```
 A → stone → wall_torch[east]  (NOT A) ┐
@@ -203,8 +213,25 @@ B → stone → wall_torch[east]  (NOT B) ┘
 | `CHUNK_RADIUS` | 电路必须建造在 Bot 当前位置 50 格范围内 | `bot.blockAt()` 返回 `null` |
 | `BUILD_NEAR_BOT` | 建造脚本使用 `Math.floor(bot.entity.position.x) + offset` 定位 | 块在未加载区块中不可读 |
 | `SETBLOCK_LOAD_RADIUS` | `/setblock` 目标超出 Bot ~13 区块（~210格）静默失败（实测：240格=0/10，200格=100%） | 远端方块未放置，构建残缺 |
-| `CMD_RATE_LIMIT` | `bot.chat` 发命令 > ~150ms/条会被服务端丢弃（实测 200ms=100%，80ms=14%）；`cmd()` 若 async 需真正 `await` 串行 | 突发命令批量丢失，构建 ~50% 残缺 |
+| `CMD_RATE_LIMIT` | `bot.chat` 发命令 > ~150ms/条会被服务端丢弃（实测 200ms=100%，80ms=14%，60ms 建 5.9k 块丢 ~1%）；`cmd()` 若 async 需真正 `await` 串行 | 突发命令批量丢失，构建残缺（缺块呈随机分布） |
 | `NO_COORD_OVERLAP` | 多门布局坐标不可重叠（全加器 5 门挤在 10×6 有 10 处碰撞） | 后写覆盖先写，每单元丢 ~6 块 |
+| `BLOCKAT_OWN_VIEW` | mineflayer `bot.blockAt()` 只读**本 bot 已加载视界**——其他玩家（含持载 bot）加载的区块，本 bot 读仍是 `null` | 主 bot 在西端读东端方块全 -1 |
+| `CHUNK_HOLDERS` | 电路跨度超过单玩家视界（~10-12 区块）时，需要**多个持载 bot** 分布在芯片各处保持服务端 tick；主 bot 读哪段就 /tp 到哪段 | alu1（356 格宽）用 2 持载 bot + 主 bot 移动读取 |
+| `TP_SETTLE` | bot /tp 后需等 ~1.5s 再发命令（传送瞬间区块未加载，命令会被丢） | /tp 后立即 /setblock 有概率静默失败 |
+
+### 三维布线实测规则（2026-08-15，alu1 血泪总结）
+
+大规模三维布线（pathfinder3d）中每条规则都对应一次"仿真过/游戏炸"的教训：
+
+| 规则 | 说明 | 违反后果 |
+|------|------|---------|
+| `VIA_FOOTPRINT_EXCLUSIVE` | via（riser 的 rep/block 格、drop 的支撑块）**独占**：任何线的灰不得落在 via 足迹上（发射顺序：支撑→灰→中继器，中继器覆盖灰） | riser 起点被断供，整条快车道死亡 |
+| `RISE_FEED_FROM_WEST` | riser 起点的输入灰**只能从西/北/南**接近；从东侧（rep 格）接近 = 灰被中继器覆盖 | 起点孤立，模型报告 unfed |
+| `NO_WEST_DETOUR` | 主输入（PI）线**禁止绕过源点向西**：回程必穿自己的 via 足迹 | n4 在西侧 -3 起跳导致整线死亡 |
+| `REFRESH_FLOW` | 上层（y≥2）长线必须**流感知**插入刷新中继器（沿信号流向，每 ≤10 格）；旧的按层 BFS 从源点投影播种永远找不到 via 馈入的段 | 长线衰减到 0，门全错 |
+| `CELL_FOOTPRINT_NOFLY` | y≥2 层的线**禁止进入门体足迹**（cell 正上方） | see-below 耦合进门内 y1 元件，门被翻转 |
+| `SUPPORT_CELL_CLEAR` | 抬高层的灰节点，其**支撑格必须是实心方块或空气**——支撑格上有任何导线（含本网 via 内部灰）= 悬空 | 游戏内掉落（`MCHPRS_TOLERATES_FLOAT` 掩盖了它） |
+| `POWER_AWARE_FED` | 布线收敛判定必须**功率感知**（馈入功率 ≥1），拓扑连通 ≠ 电气连通（长线无刷新衰减到 0） | "0 缺网" 全是假象，输出恒卡 |
 
 ### 已验证门模板
 
@@ -215,6 +242,7 @@ B → stone → wall_torch[east]  (NOT B) ┘
 | **NOT** | 2/2 ✅ | 1 地面火把 + 1 石块 + 2 灰 |
 | **AND** | 4/4 ✅ | 3 地面火把 + 1 墙上火把输出，灰在安装块顶上 |
 | **NAND** | 4/4 ✅ | AND + 墙上火把 NOT（门链验证通过） |
+| **6 标准单元（cell_library）** | 各 4/4 ✅ | MCHPRS 验证 + target 输出级（中继器→target→灰，防反向驱动）；游戏内 AND/NAND 复测 4/4 |
 
 ### MCHPRS 平面门模板（块级仿真验证）
 
@@ -234,7 +262,10 @@ B → stone → wall_torch[east]  (NOT B) ┘
 | **Full Adder** | ✅ | ⏳ | 2×XOR + 2×AND + OR，门间留足间距（`NO_COORD_OVERLAP`） |
 | **Ripple-Carry Adder** | ✅ | ⏳ | 全加器链，进位灰同层直连 |
 
-> **核心结论**：可靠路径是 **nucleation.Schematic 建块 → MCHPRS 仿真真值表 → 导出 litematic 游戏内一次性粘贴**。手工逐块 /setblock 受命令速率（`CMD_RATE_LIMIT`）、区块加载（`SETBLOCK_LOAD_RADIUS`）、坐标重叠（`NO_COORD_OVERLAP`）三重限制，不适合大规模电路。门布局必须遵守 MCHPRS 仿真规则（站立火把同层、强充能直线段）。
+> **核心结论（2026-08-15 更新）**：两条路径均已验证可行——
+> 1. **/setblock 直建**：alu1（3.3 万块、356 格宽）用 bot /setblock 实建并跑通 40 向量真值表。要点：150ms 命令间隔、多持载 bot、10s 稳定、悬空审计（`NO_FLOATING_DUST`）。
+> 2. **litematic 粘贴**：任意规模一次性粘贴，绕过速率/距离限制。
+> 门布局必须遵守 MCHPRS 仿真规则（站立火把同层、强充能直线段），并**以游戏实测为准**（MCHPRS 容忍悬空而游戏掉落）。
 
 ## 电路编码格式规范
 
